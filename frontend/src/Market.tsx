@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import LineChart, { SERIES_COLORS } from './LineChart'
 import type { ChartSeries } from './LineChart'
-import { ApiError, collectCandles, getCandles, getStocks } from './api'
+import {
+  ApiError,
+  collectCandles,
+  collectIncremental,
+  collectTradingDays,
+  getCandles,
+  getStocks,
+} from './api'
 import type { CandleSeries, Me, Stock } from './api'
 
 type Props = {
@@ -87,6 +94,43 @@ export default function Market({ me, onSessionLost }: Props) {
     }
   }
 
+  const collectIncrementally = async () => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      // 마지막으로 쌓인 날짜 다음 거래일부터만 받습니다 — 전체를 다시 받지 않습니다
+      const r = await collectIncremental(ticker, 'paper')
+      setNotice(
+        r.fetched === 0
+          ? '이미 최신입니다 — 받을 새 거래일이 없습니다.'
+          : `${r.fetched}건만 새로 받았습니다 (${r.first?.slice(0, 10)} ~ ${r.last?.slice(0, 10)}).`,
+      )
+      setError(null)
+      await load()
+    } catch (e) {
+      handle(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const collectCalendar = async () => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      // 거래일 캘린더는 계좌와 무관한 공개 정보지만, 모의 도메인은 이 조회를
+      // 거절해서 서버가 내부적으로 실전 도메인을 씁니다 (주문은 내지 않습니다)
+      const year = new Date().getFullYear()
+      const r = await collectTradingDays(year)
+      setNotice(`${r.year}년 거래일 캘린더 ${r.fetched}일치를 받았습니다.`)
+      setError(null)
+    } catch (e) {
+      handle(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const series: ChartSeries[] = useMemo(() => {
     if (!data || data.candles.length === 0) return []
     return [
@@ -138,9 +182,17 @@ export default function Market({ me, onSessionLost }: Props) {
         </label>
         <div className="spacer" />
         {canCollect && (
-          <button className="primary" onClick={() => void collect()} disabled={busy}>
-            {busy ? 'KIS 에서 받는 중…' : 'KIS 에서 일봉 수집'}
-          </button>
+          <div className="filters" style={{ marginTop: 0 }}>
+            <button className="primary" onClick={() => void collect()} disabled={busy}>
+              {busy ? 'KIS 에서 받는 중…' : '전체 수집'}
+            </button>
+            <button onClick={() => void collectIncrementally()} disabled={busy}>
+              증분 수집
+            </button>
+            <button onClick={() => void collectCalendar()} disabled={busy} title="거래일 캘린더 — 실전 도메인으로 조회만 합니다. 주문은 내지 않습니다">
+              거래일 캘린더 받기
+            </button>
+          </div>
         )}
       </div>
 

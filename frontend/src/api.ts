@@ -18,6 +18,8 @@ export type CollectResult = {
   first: string | null
   last: string | null
 }
+export type TradingDay = { date: string; is_open: boolean }
+export type CalendarCollectResult = { year: number; fetched: number; inserted: number }
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
@@ -157,3 +159,13 @@ export const collectCandles = (ticker: string, mode: 'paper' | 'live', days: num
   request<CollectResult>(`/api/stocks/${ticker}/collect?mode=${mode}&days=${days}`, {
     method: 'POST',
   })
+// 마지막 적재일 다음 거래일부터만 받습니다 — 전체를 다시 받지 않습니다
+export const collectIncremental = (ticker: string, mode: 'paper' | 'live') =>
+  request<CollectResult>(`/api/stocks/${ticker}/collect-incremental?mode=${mode}`, {
+    method: 'POST',
+  })
+// 거래일 캘린더. 조회(DB 만 봄)는 누구나, 수집(KIS 실전 도메인)은 admin 만
+export const getTradingDays = (year: number) =>
+  request<TradingDay[]>(`/api/trading-days?year=${year}`)
+export const collectTradingDays = (year: number) =>
+  request<CalendarCollectResult>(`/api/trading-days/collect?year=${year}`, { method: 'POST' })

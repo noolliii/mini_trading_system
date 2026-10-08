@@ -72,6 +72,8 @@ def test_only_admin_reads_everyones_accounts() -> None:
         ("DELETE", "/api/users/1", None),
         ("POST", "/api/kis/token?mode=paper", None),
         ("POST", "/api/stocks/005930/collect?mode=paper", None),
+        ("POST", "/api/stocks/005930/collect-incremental?mode=paper", None),
+        ("POST", "/api/trading-days/collect?year=2026", None),
     ],
 )
 def test_admin_endpoints_reject_user_session(

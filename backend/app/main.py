@@ -1,18 +1,19 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import access_log, auth, db, kis
+from . import access_log, auth, db, kis, trading_calendar
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
     AccountOut,
+    CalendarCollectResult,
     Candle,
     CandleSeries,
     CollectResult,
@@ -22,6 +23,7 @@ from .schemas import (
     MeUpdate,
     SignupIn,
     Stock,
+    TradingDay,
     UserIn,
     UserOut,
     UserUpdate,
@@ -542,3 +544,155 @@ async def collect_candles(
         first=fetched[0].time,
         last=fetched[-1].time,
     )
+
+
+@app.post("/api/stocks/{ticker}/collect-incremental", response_model=CollectResult)
+async def collect_incremental(
+    ticker: str,
+    user: CurrentUserDep,
+    mode: str = Query("paper", pattern=r"^(paper|live)$"),
+) -> CollectResult:
+    """마지막으로 쌓인 날짜 다음 거래일부터 오늘까지만 받습니다.
+
+    "다음 거래일"은 trading_days 캘린더로 구합니다. 캘린더가 그 구간을
+    못 덮으면(아직 수집한 적이 없으면) 하루씩 건너뛰는 것으로 물러서고,
+    KIS 응답이 비어 있으면 그 날이 휴장이었던 것으로 보고 넘어갑니다 —
+    같은 날짜는 ON CONFLICT 로 덮어쓰니 여러 번 불러도 안전합니다.
+    """
+    auth.require(user, "market:write")
+
+    async with db.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM stocks WHERE ticker = $1", ticker)
+        if exists is None:
+            raise HTTPException(status_code=404, detail={
+                "code": "stock_not_found",
+                "message": "종목 마스터에 없는 종목코드입니다",
+            })
+
+        last = await conn.fetchval(
+            "SELECT max(time)::date FROM daily_candles WHERE ticker = $1", ticker
+        )
+        open_days = [
+            r["date"]
+            for r in await conn.fetch(
+                "SELECT date FROM trading_days WHERE is_open AND date > coalesce($1, date - 1)",
+                last,
+            )
+        ]
+
+    today = datetime.now(kis.KST).date()
+
+    if last is None:
+        # 한 번도 받은 적이 없으면 처음 받을 때와 같은 기본 구간으로 전부 받습니다
+        start = today - timedelta(days=365)
+    else:
+        start = trading_calendar.next_trading_day_after(open_days, last)
+        if start is None:
+            # 캘린더가 이 구간을 모릅니다 — 하루 뒤로 물러서서라도 진행합니다
+            start = last + timedelta(days=1)
+
+    if start > today:
+        return CollectResult(ticker=ticker, mode=mode, fetched=0, inserted=0)
+
+    try:
+        fetched = await kis.fetch_daily_candles(ticker, mode, start, today)
+    except kis.KisError as e:
+        raise HTTPException(status_code=502, detail={"code": "kis_error", "message": str(e)})
+
+    if not fetched:
+        return CollectResult(ticker=ticker, mode=mode, fetched=0, inserted=0)
+
+    async with db.acquire() as conn:
+        before = await conn.fetchval(
+            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
+        )
+        await conn.executemany(
+            """
+            INSERT INTO daily_candles (time, ticker, open, high, low, close, volume)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (ticker, time) DO UPDATE
+               SET open = excluded.open, high = excluded.high, low = excluded.low,
+                   close = excluded.close, volume = excluded.volume
+            """,
+            [
+                (c.time, ticker, c.open, c.high, c.low, c.close, c.volume)
+                for c in fetched
+            ],
+        )
+        after = await conn.fetchval(
+            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
+        )
+
+    return CollectResult(
+        ticker=ticker,
+        mode=mode,
+        fetched=len(fetched),
+        inserted=after - before,
+        first=fetched[0].time,
+        last=fetched[-1].time,
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# 거래일 캘린더 — admin 만. 조회만 하지만 실전(live) 앱키를 씁니다
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/trading-days", response_model=list[TradingDay])
+async def list_trading_days(
+    user: CurrentUserDep,
+    year: int = Query(..., ge=2000, le=2100),
+) -> list[TradingDay]:
+    """저장해 둔 캘린더를 읽습니다. KIS 로 나가지 않습니다."""
+    auth.require(user, "market:read")
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT date, is_open FROM trading_days
+            WHERE date >= make_date($1, 1, 1) AND date <= make_date($1, 12, 31)
+            ORDER BY date
+            """,
+            year,
+        )
+
+    return [TradingDay(**dict(r)) for r in rows]
+
+
+@app.post("/api/trading-days/collect", response_model=CalendarCollectResult)
+async def collect_trading_days(
+    user: CurrentUserDep,
+    year: int = Query(..., ge=2000, le=2100),
+) -> CalendarCollectResult:
+    """그 해의 거래일 캘린더를 KIS 실전 도메인에서 받아 저장합니다.
+
+    주문은 내지 않습니다 — 계좌와 무관한 시장 전체의 공개 정보를 받아올 뿐입니다.
+    모의(paper) 도메인은 이 TR 자체를 거절해서, kis.fetch_trading_calendar
+    가 내부적으로 항상 실전 도메인을 씁니다.
+    """
+    auth.require(user, "market:write")
+
+    start = date(year, 1, 1)
+    end = date(year, 12, 31)
+
+    try:
+        fetched = await kis.fetch_trading_calendar(start, end)
+    except kis.KisError as e:
+        raise HTTPException(status_code=502, detail={"code": "kis_error", "message": str(e)})
+
+    async with db.acquire() as conn:
+        before = await conn.fetchval(
+            "SELECT count(*) FROM trading_days WHERE date BETWEEN $1 AND $2", start, end
+        )
+        await conn.executemany(
+            """
+            INSERT INTO trading_days (date, is_open) VALUES ($1, $2)
+            ON CONFLICT (date) DO UPDATE SET is_open = excluded.is_open
+            """,
+            [(d.date, d.is_open) for d in fetched],
+        )
+        after = await conn.fetchval(
+            "SELECT count(*) FROM trading_days WHERE date BETWEEN $1 AND $2", start, end
+        )
+
+    return CalendarCollectResult(year=year, fetched=len(fetched), inserted=after - before)

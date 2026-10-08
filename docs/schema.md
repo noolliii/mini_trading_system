@@ -16,6 +16,7 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 | --- | --- | --- | --- |
 | `stocks` | 종목 마스터 | `ticker` | — |
 | `daily_candles` | 일봉 (하이퍼테이블) | 없음 — 유니크 인덱스로 대신 | `ticker` → `stocks` CASCADE |
+| `trading_days` | 거래일 캘린더 | `date` | — |
 | `users` | 로그인 계정 | `id` | — |
 | `accounts` | 증권 계좌 | `account_no` | `user_id` → `users` CASCADE |
 | `sessions` | 로그인 세션 | `session_id` | `user_id` → `users` CASCADE |
@@ -51,6 +52,22 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 - 하이퍼테이블 · 조각 2개 · `time` 은 거래일 00:00 (Asia/Seoul)
 - 일봉은 하루에 한 줄이라 조각을 1년 단위로 잡았습니다 (센서값처럼 쏟아지지 않습니다)
 - 현재 244행 — **KIS 모의 도메인에서 받은 삼성전자 실제 일봉** (2025-10-10 ~ 2026-10-08)
+
+## trading_days
+
+| 칼럼 | 자료형 | NULL |
+| --- | --- | --- |
+| `date` | date | NO |
+| `is_open` | boolean | NO |
+
+- PK: `date`
+- KIS 국내휴장일조회(`CTCA0903R`)로 받습니다. 이 TR 은 모의 도메인을 거절해서
+  **실전(live) 도메인으로만** 받습니다 — 계좌와 무관한 공개 정보라 주문은 안 나갑니다.
+  (2026-10-08 사용자 승인)
+- 수집: `POST /api/trading-days/collect?year=` (admin). 조회: `GET /api/trading-days?year=` (둘 다)
+- 증분 수집(`collect-incremental`)이 "마지막 적재일 다음 거래일"을 구할 때 씁니다
+- 2026년 365일 수집 확인 — 개장 244일 · 휴장 121일. 1/1(신정)·10/3(개천절)·10/9(한글날)
+  전부 정확히 휴장으로 들어왔습니다 (10/9는 평일인데도 휴장 — 주말만 걸러서는 못 잡는 경우)
 
 ## users
 

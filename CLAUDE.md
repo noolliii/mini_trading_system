@@ -31,7 +31,8 @@ backend/app/
   main.py      엔드포인트. 권한 검사를 여기서 호출합니다
   auth.py      비밀번호 해시 · 세션 · PERMISSIONS 표
   access_log.py  접근 로그에서 계좌번호를 가립니다
-  kis.py       앱키 → 접근 토큰(캐시) → 일봉 조회
+  kis.py       앱키 → 접근 토큰(캐시) → 일봉 · 거래일 캘린더 조회
+  trading_calendar.py  거래일 계산(DB 없는 순수 함수) — 「n거래일 전」·「다음 거래일」
   db.py        asyncpg 연결 풀
   schemas.py   요청 · 응답 모델 (pydantic)
 frontend/src/
@@ -44,14 +45,17 @@ frontend/src/
   Users.tsx    사용자 · KIS 토큰 (admin 전용)
   api.ts       fetch 래퍼. ApiError 가 서버의 실패 코드를 그대로 들고 옵니다
 db/init/
-  01_schema.sql  stocks · daily_candles(하이퍼테이블) · users / accounts / sessions
-  02_seed.sql    종목 마스터 8개와 수업용 계정 (일봉은 KIS 에서 받습니다)
+  01_schema.sql  stocks · daily_candles(하이퍼테이블) · trading_days ·
+                 users / accounts / sessions
+  02_seed.sql    종목 마스터 8개와 수업용 계정 (일봉·캘린더는 KIS 에서 받습니다)
 backend/tests/
   test_permissions.py  user 세션으로 관리자 API → 403. DB 없이 돕니다
   test_kis_cache.py    발급 횟수 · 만료 · 재시작 · 로그 누출
   test_daily_candles.py  저장해 둔 KIS 응답으로 파서 확인
+  test_trading_calendar.py  거래일 계산기 — 공휴일 fixture 로 확인
   test_access_log.py   계좌번호가 로그에 남지 않는지
   fixtures/daily_response.json  실제로 받은 일봉 응답 한 건
+  fixtures/holiday_response.json  실제로 받은 휴장일 응답 (한글날 포함)
 docs/
   schema.md      돌고 있는 DB 에서 읽어 적은 스키마 표
   secrets-checklist.md  비밀이 로그·화면·커밋으로 새지 않는지 확인한 기록
@@ -69,6 +73,11 @@ docs/
   막힙니다. 이 경로는 볼륨이 아니라 호스트·git 으로 나가지 않습니다.
 - **실습은 모의(paper) 도메인으로 합니다.** 실전·모의 키를 섞으면 엉뚱한 서버에
   엉뚱한 키가 갑니다. 일봉 조회는 모의에서도 나옵니다.
+- **거래일 캘린더(국내휴장일조회)만 예외로 실전(live) 도메인을 씁니다.** 이 TR 은
+  계좌와 무관한 시장 전체의 공개 정보인데도 모의 도메인이 거절합니다
+  (`EGW02006 모의투자 TR 이 아닙니다`). `kis.fetch_trading_calendar` 가 내부적으로
+  항상 실전 도메인을 쓰고, mode 인자를 안 받는 것 자체가 그 뜻입니다. 조회만 하고
+  주문은 내지 않습니다 — 2026-10-08 사용자 승인 하에 적용했습니다.
 - **권한 판단은 `auth.PERMISSIONS` 를 봅니다.** 화면에서 버튼을 숨기는 것은 친절일 뿐이고,
   모든 엔드포인트에서 `auth.require(user, "...")` 로 다시 막습니다.
 - **실패는 세 가지를 구분합니다.** 인증 실패(401 `invalid_credentials`),

@@ -26,7 +26,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel
 
-from .schemas import Candle
+from .schemas import Candle, TradingDay
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,14 @@ CHART_PAGE_DAYS = 130
 RATE_SLEEP_SECONDS = 0.4
 
 KST = timezone(timedelta(hours=9))
+
+# 국내휴장일조회. 계좌와 무관한 시장 전체의 공개 정보인데도, 모의(paper) 도메인은
+# 이 TR 을 거절합니다("모의투자 TR 이 아닙니다" EGW02006) — 그래서 이 함수만 실전
+# 도메인을 씁니다. 조회만 하고 주문은 내지 않습니다. mode 인자를 안 받는 것 자체가
+# "이 호출은 늘 live" 라는 뜻이라, 실수로 다른 모드를 넘길 길이 없습니다.
+CALENDAR_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday"
+CALENDAR_TR_ID = "CTCA0903R"
+CALENDAR_MODE = "live"
 
 # 토큰을 남겨 두는 자리. 컨테이너 안이고, 볼륨이 아니라 바깥으로 나가지 않습니다
 TOKEN_DIR = Path(tempfile.gettempdir()) / "kis-tokens"
@@ -257,6 +265,92 @@ def reset_cache() -> None:
     여기서 지우면 돌고 있는 서버가 들고 있던 진짜 토큰을 날리게 됩니다.
     """
     _cache.clear()
+
+
+# ──────────────────────────────────────────────────────────────
+# 거래일 캘린더 (실전 도메인 전용)
+# ──────────────────────────────────────────────────────────────
+def parse_calendar_rows(rows: list[dict[str, str]]) -> list[TradingDay]:
+    """KIS 의 output 을 거래일로 바꿉니다. 날짜가 8자리가 아니면 버립니다."""
+    days: list[TradingDay] = []
+
+    for row in rows:
+        raw = (row.get("bass_dt") or "").strip()
+        if len(raw) != 8:
+            continue
+
+        days.append(
+            TradingDay(
+                date=date(int(raw[:4]), int(raw[4:6]), int(raw[6:])),
+                is_open=row.get("opnd_yn") == "Y",
+            )
+        )
+
+    return days
+
+
+async def _calendar_page(
+    client: httpx.AsyncClient, token: str, start: date, ctx_nk: str, ctx_fk: str, cont: str
+) -> tuple[list[dict[str, str]], str, str, bool]:
+    """한 페이지(24건)를 받아 (행, 다음 nk, 다음 fk, 더있음) 을 돌려줍니다."""
+    app_key, app_secret = credentials(CALENDAR_MODE)
+
+    res = await client.get(
+        f"{HOSTS[CALENDAR_MODE]}{CALENDAR_PATH}",
+        headers={
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": CALENDAR_TR_ID,
+            "custtype": "P",
+            "tr_cont": cont,
+        },
+        params={
+            "BASS_DT": start.strftime("%Y%m%d"),
+            "CTX_AREA_NK": ctx_nk,
+            "CTX_AREA_FK": ctx_fk,
+        },
+    )
+
+    if res.status_code != 200:
+        raise KisError(f"거래일 조회가 거절되었습니다 (HTTP {res.status_code})")
+
+    body = res.json()
+    if body.get("rt_cd") != "0":
+        raise KisError(f"거래일 조회 실패 [{body.get('msg_cd')}] {body.get('msg1', '').strip()}")
+
+    has_more = res.headers.get("tr_cont") in ("M", "F")
+    return body.get("output") or [], body.get("ctx_area_nk", ""), body.get("ctx_area_fk", ""), has_more
+
+
+async def fetch_trading_calendar(start: date, end: date) -> list[TradingDay]:
+    """start~end 구간의 거래일을 받습니다. 이 TR 은 실전 도메인만 지원합니다.
+
+    한 페이지가 고정으로 24건씩 오고, start 부터 이어서 미래로만 나갑니다 —
+    날짜 구간을 끊어 거슬러 가는 일봉 조회와 다르게, 여기는 앞에서부터 쭉 읽습니다.
+    """
+    token = await access_token(CALENDAR_MODE)
+    collected: dict[date, TradingDay] = {}
+    ctx_nk, ctx_fk, cont = "", "", ""
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            rows, ctx_nk, ctx_fk, has_more = await _calendar_page(
+                client, token, start, ctx_nk, ctx_fk, cont
+            )
+            cont = "N"
+
+            for day in parse_calendar_rows(rows):
+                collected[day.date] = day
+
+            last_seen = max((d.date for d in parse_calendar_rows(rows)), default=None)
+            if last_seen is None or last_seen >= end or not has_more:
+                break
+
+            await asyncio.sleep(RATE_SLEEP_SECONDS)
+
+    return [collected[key] for key in sorted(collected) if start <= key <= end]
 
 
 # ──────────────────────────────────────────────────────────────

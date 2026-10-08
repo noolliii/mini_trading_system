@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,6 +24,17 @@ class CandleSeries(BaseModel):
     ticker: str
     name: str
     candles: list[Candle]
+
+
+class TradingDay(BaseModel):
+    date: date
+    is_open: bool
+
+
+class CalendarCollectResult(BaseModel):
+    year: int
+    fetched: int
+    inserted: int
 
 
 class CollectResult(BaseModel):

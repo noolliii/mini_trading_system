@@ -37,6 +37,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS daily_candles_ticker_time_idx
 CREATE INDEX IF NOT EXISTS daily_candles_time_idx
   ON daily_candles (time DESC);
 
+-- 거래일 캘린더. KIS 국내휴장일조회(실전 도메인 전용)로 받아 채웁니다 —
+-- 시드에는 넣지 않습니다. 증분 수집이 "마지막 적재일 다음 거래일"을 구할 때 씁니다.
+CREATE TABLE IF NOT EXISTS trading_days (
+  date    DATE PRIMARY KEY,
+  is_open BOOLEAN NOT NULL
+);
+
 -- ──────────────────────────────────────────────────────────────
 -- 로그인 · 권한
 -- ──────────────────────────────────────────────────────────────
