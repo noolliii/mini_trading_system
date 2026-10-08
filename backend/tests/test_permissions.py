@@ -74,6 +74,7 @@ def test_only_admin_reads_everyones_accounts() -> None:
         ("POST", "/api/stocks/005930/collect?mode=paper", None),
         ("POST", "/api/stocks/005930/collect-incremental?mode=paper", None),
         ("POST", "/api/trading-days/collect?year=2026", None),
+        ("POST", "/api/collection-status/run-now?mode=paper", None),
     ],
 )
 def test_admin_endpoints_reject_user_session(
@@ -98,6 +99,17 @@ def test_no_cookie_is_session_expired_not_forbidden(anonymous: TestClient) -> No
     res = anonymous.get("/api/me")
     assert res.status_code == 401
     assert res.json()["detail"]["code"] == "session_expired"
+
+
+def test_user_can_read_collection_status_but_not_trigger_it() -> None:
+    """신선도 조회(읽기)는 market:read 라 user 도 됩니다 — 쓰기(run-now)만 막힙니다.
+
+    GET /api/collection-status 는 DB 를 읽는 엔드포인트라 이 파일의 다른
+    테스트처럼 DB 없이 돌리진 못합니다 — 권한표로만 확인합니다. 실제 호출은
+    curl 로 수동 검증했습니다(run-now 는 바로 위 표에서 403 을 확인합니다).
+    """
+    assert auth.allows("user", "market:read")
+    assert not auth.allows("user", "market:write")
 
 
 def test_signup_endpoint_needs_no_session(anonymous: TestClient) -> None:

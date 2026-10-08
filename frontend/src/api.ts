@@ -20,6 +20,20 @@ export type CollectResult = {
 }
 export type TradingDay = { date: string; is_open: boolean }
 export type CalendarCollectResult = { year: number; fetched: number; inserted: number }
+export type CollectionStatus = {
+  ticker: string
+  name: string
+  last_date: string | null
+  checked_at: string
+  status: 'success' | 'partial' | 'failed'
+  message: string | null
+}
+export type RunNowResult = {
+  skipped_holiday: boolean
+  success: number
+  failed: number
+  tickers: number
+}
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
@@ -169,3 +183,8 @@ export const getTradingDays = (year: number) =>
   request<TradingDay[]>(`/api/trading-days?year=${year}`)
 export const collectTradingDays = (year: number) =>
   request<CalendarCollectResult>(`/api/trading-days/collect?year=${year}`, { method: 'POST' })
+// 신선도 — 종목별로 마지막 수집이 언제·어떻게 끝났는지. 조회는 누구나
+export const getCollectionStatus = () => request<CollectionStatus[]>('/api/collection-status')
+// 스케줄러가 평일 16:00(KST) 에 돌리는 것과 같은 일을 지금 바로 합니다 — admin 만
+export const runCollectionNow = (mode: 'paper' | 'live' = 'paper') =>
+  request<RunNowResult>(`/api/collection-status/run-now?mode=${mode}`, { method: 'POST' })

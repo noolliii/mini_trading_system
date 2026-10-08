@@ -17,6 +17,7 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 | `stocks` | 종목 마스터 | `ticker` | — |
 | `daily_candles` | 일봉 (하이퍼테이블) | 없음 — 유니크 인덱스로 대신 | `ticker` → `stocks` CASCADE |
 | `trading_days` | 거래일 캘린더 | `date` | — |
+| `collection_status` | 종목별 신선도 | `ticker` | `ticker` → `stocks` CASCADE |
 | `users` | 로그인 계정 | `id` | — |
 | `accounts` | 증권 계좌 | `account_no` | `user_id` → `users` CASCADE |
 | `sessions` | 로그인 세션 | `session_id` | `user_id` → `users` CASCADE |
@@ -68,6 +69,22 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 - 증분 수집(`collect-incremental`)이 "마지막 적재일 다음 거래일"을 구할 때 씁니다
 - 2026년 365일 수집 확인 — 개장 244일 · 휴장 121일. 1/1(신정)·10/3(개천절)·10/9(한글날)
   전부 정확히 휴장으로 들어왔습니다 (10/9는 평일인데도 휴장 — 주말만 걸러서는 못 잡는 경우)
+
+## collection_status
+
+| 칼럼 | 자료형 | NULL |
+| --- | --- | --- |
+| `ticker` | text | NO |
+| `last_date` | date | YES |
+| `checked_at` | timestamptz | NO |
+| `status` | text | NO |
+| `message` | text | YES |
+
+- PK: `ticker` · FK: `ticker` → `stocks(ticker)` ON DELETE CASCADE
+- CHECK: `status IN ('success','partial','failed')`
+- 종목마다 한 줄만 유지합니다 (`ON CONFLICT (ticker) DO UPDATE`) — 기록이 아니라 "지금 상태"입니다
+- 평일 16:00(KST) 스케줄러가 종목마다 덮어씁니다. `POST /api/collection-status/run-now`
+  로 cron 을 기다리지 않고 같은 함수를 바로 불러 시험할 수 있습니다 (admin)
 
 ## users
 

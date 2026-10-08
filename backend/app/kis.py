@@ -148,6 +148,19 @@ def credentials(mode: str) -> tuple[str, str]:
     return app_key, app_secret
 
 
+async def _guarded(call):  # type: ignore[no-untyped-def]
+    """httpx 의 네트워크 예외(타임아웃·DNS 실패 등)를 KisError 하나로 모읍니다.
+
+    이게 없으면 한 종목의 연결 실패가 KisError 가 아닌 날 예외로 튀어서,
+    배치 작업(run_incremental_for_all_stocks)의 try/except 를 비껴가고
+    나머지 종목까지 같이 멈춥니다.
+    """
+    try:
+        return await call
+    except httpx.HTTPError as e:
+        raise KisError(f"KIS 서버에 연결할 수 없습니다 ({e.__class__.__name__})")
+
+
 def mask(token: str) -> str:
     """토큰을 그대로 보여주지 않습니다. 앞 네 글자와 길이만."""
     return f"{token[:4]}… ({len(token)}자)"
@@ -164,13 +177,15 @@ async def _request_new(mode: str) -> _Cached:
     host = HOSTS[mode]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        res = await client.post(
-            f"{host}{TOKEN_PATH}",
-            json={
-                "grant_type": "client_credentials",
-                "appkey": app_key,
-                "appsecret": app_secret,
-            },
+        res = await _guarded(
+            client.post(
+                f"{host}{TOKEN_PATH}",
+                json={
+                    "grant_type": "client_credentials",
+                    "appkey": app_key,
+                    "appsecret": app_secret,
+                },
+            )
         )
 
     if res.status_code != 200:
@@ -295,22 +310,24 @@ async def _calendar_page(
     """한 페이지(24건)를 받아 (행, 다음 nk, 다음 fk, 더있음) 을 돌려줍니다."""
     app_key, app_secret = credentials(CALENDAR_MODE)
 
-    res = await client.get(
-        f"{HOSTS[CALENDAR_MODE]}{CALENDAR_PATH}",
-        headers={
-            "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": app_key,
-            "appsecret": app_secret,
-            "tr_id": CALENDAR_TR_ID,
-            "custtype": "P",
-            "tr_cont": cont,
-        },
-        params={
-            "BASS_DT": start.strftime("%Y%m%d"),
-            "CTX_AREA_NK": ctx_nk,
-            "CTX_AREA_FK": ctx_fk,
-        },
+    res = await _guarded(
+        client.get(
+            f"{HOSTS[CALENDAR_MODE]}{CALENDAR_PATH}",
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": app_key,
+                "appsecret": app_secret,
+                "tr_id": CALENDAR_TR_ID,
+                "custtype": "P",
+                "tr_cont": cont,
+            },
+            params={
+                "BASS_DT": start.strftime("%Y%m%d"),
+                "CTX_AREA_NK": ctx_nk,
+                "CTX_AREA_FK": ctx_fk,
+            },
+        )
     )
 
     if res.status_code != 200:
@@ -396,24 +413,26 @@ async def _chart_page(
     """날짜 구간 하나(최대 100건)를 받아 output2 를 그대로 돌려줍니다."""
     app_key, app_secret = credentials(mode)
 
-    res = await client.get(
-        f"{HOSTS[mode]}{CHART_PATH}",
-        headers={
-            "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": app_key,
-            "appsecret": app_secret,
-            "tr_id": CHART_TR_ID,
-            "custtype": "P",
-        },
-        params={
-            "FID_COND_MRKT_DIV_CODE": "J",  # 주식
-            "FID_INPUT_ISCD": ticker,
-            "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
-            "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
-            "FID_PERIOD_DIV_CODE": "D",  # 일봉
-            "FID_ORG_ADJ_PRC": "0",  # 수정주가
-        },
+    res = await _guarded(
+        client.get(
+            f"{HOSTS[mode]}{CHART_PATH}",
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": app_key,
+                "appsecret": app_secret,
+                "tr_id": CHART_TR_ID,
+                "custtype": "P",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",  # 주식
+                "FID_INPUT_ISCD": ticker,
+                "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+                "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
+                "FID_PERIOD_DIV_CODE": "D",  # 일봉
+                "FID_ORG_ADJ_PRC": "0",  # 수정주가
+            },
+        )
     )
 
     if res.status_code != 200:

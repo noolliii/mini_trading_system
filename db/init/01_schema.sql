@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS trading_days (
   is_open BOOLEAN NOT NULL
 );
 
+-- 증분 수집 신선도. 스케줄러가 돌 때마다 종목별로 한 줄씩 덮어씁니다.
+CREATE TABLE IF NOT EXISTS collection_status (
+  ticker     TEXT PRIMARY KEY REFERENCES stocks(ticker) ON DELETE CASCADE,
+  last_date  DATE,
+  checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status     TEXT NOT NULL CHECK (status IN ('success', 'partial', 'failed')),
+  message    TEXT
+);
+
 -- ──────────────────────────────────────────────────────────────
 -- 로그인 · 권한
 -- ──────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import access_log, auth, db, kis, trading_calendar
+from . import access_log, auth, collection, db, kis, scheduler
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
@@ -16,6 +16,7 @@ from .schemas import (
     CalendarCollectResult,
     Candle,
     CandleSeries,
+    CollectionStatus,
     CollectResult,
     LoginIn,
     LoginOut,
@@ -39,9 +40,11 @@ access_log.install()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
+    scheduler.start()
     try:
         yield
     finally:
+        scheduler.shutdown()
         await db.disconnect()
 
 
@@ -554,88 +557,20 @@ async def collect_incremental(
 ) -> CollectResult:
     """마지막으로 쌓인 날짜 다음 거래일부터 오늘까지만 받습니다.
 
-    "다음 거래일"은 trading_days 캘린더로 구합니다. 캘린더가 그 구간을
-    못 덮으면(아직 수집한 적이 없으면) 하루씩 건너뛰는 것으로 물러서고,
-    KIS 응답이 비어 있으면 그 날이 휴장이었던 것으로 보고 넘어갑니다 —
-    같은 날짜는 ON CONFLICT 로 덮어쓰니 여러 번 불러도 안전합니다.
+    새벽 스케줄러가 종목 전체에 돌리는 것과 같은 함수(collection.py)를 씁니다 —
+    버튼으로 받을 때와 자동으로 받을 때가 다르게 동작하지 않습니다.
     """
     auth.require(user, "market:write")
 
-    async with db.acquire() as conn:
-        exists = await conn.fetchval("SELECT 1 FROM stocks WHERE ticker = $1", ticker)
-        if exists is None:
-            raise HTTPException(status_code=404, detail={
-                "code": "stock_not_found",
-                "message": "종목 마스터에 없는 종목코드입니다",
-            })
-
-        last = await conn.fetchval(
-            "SELECT max(time)::date FROM daily_candles WHERE ticker = $1", ticker
-        )
-        open_days = [
-            r["date"]
-            for r in await conn.fetch(
-                "SELECT date FROM trading_days WHERE is_open AND date > coalesce($1, date - 1)",
-                last,
-            )
-        ]
-
-    today = datetime.now(kis.KST).date()
-
-    if last is None:
-        # 한 번도 받은 적이 없으면 처음 받을 때와 같은 기본 구간으로 전부 받습니다
-        start = today - timedelta(days=365)
-    else:
-        start = trading_calendar.next_trading_day_after(open_days, last)
-        if start is None:
-            # 캘린더가 이 구간을 모릅니다 — 하루 뒤로 물러서서라도 진행합니다
-            start = last + timedelta(days=1)
-
-    if start > today:
-        return CollectResult(ticker=ticker, mode=mode, fetched=0, inserted=0)
-
     try:
-        fetched = await kis.fetch_daily_candles(ticker, mode, start, today)
+        return await collection.collect_incremental_ticker(ticker, mode)
+    except collection.TickerNotFound:
+        raise HTTPException(status_code=404, detail={
+            "code": "stock_not_found",
+            "message": "종목 마스터에 없는 종목코드입니다",
+        })
     except kis.KisError as e:
         raise HTTPException(status_code=502, detail={"code": "kis_error", "message": str(e)})
-
-    if not fetched:
-        return CollectResult(ticker=ticker, mode=mode, fetched=0, inserted=0)
-
-    async with db.acquire() as conn:
-        before = await conn.fetchval(
-            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
-        )
-        await conn.executemany(
-            """
-            INSERT INTO daily_candles (time, ticker, open, high, low, close, volume)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (ticker, time) DO UPDATE
-               SET open = excluded.open, high = excluded.high, low = excluded.low,
-                   close = excluded.close, volume = excluded.volume
-            """,
-            [
-                (c.time, ticker, c.open, c.high, c.low, c.close, c.volume)
-                for c in fetched
-            ],
-        )
-        after = await conn.fetchval(
-            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
-        )
-
-    return CollectResult(
-        ticker=ticker,
-        mode=mode,
-        fetched=len(fetched),
-        inserted=after - before,
-        first=fetched[0].time,
-        last=fetched[-1].time,
-    )
-
-
-# ══════════════════════════════════════════════════════════════
-# 거래일 캘린더 — admin 만. 조회만 하지만 실전(live) 앱키를 씁니다
-# ══════════════════════════════════════════════════════════════
 
 
 @app.get("/api/trading-days", response_model=list[TradingDay])
@@ -696,3 +631,47 @@ async def collect_trading_days(
         )
 
     return CalendarCollectResult(year=year, fetched=len(fetched), inserted=after - before)
+
+
+# ══════════════════════════════════════════════════════════════
+# 신선도 — 종목별로 오늘 것이 들어왔는지. 자동 수집은 스케줄러가 돕니다
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/collection-status", response_model=list[CollectionStatus])
+async def list_collection_status(user: CurrentUserDep) -> list[CollectionStatus]:
+    """최근 수집이 종목별로 성공·실패했는지 봅니다. KIS 로 나가지 않습니다."""
+    auth.require(user, "market:read")
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.ticker, s.name, cs.last_date, cs.checked_at, cs.status, cs.message
+            FROM stocks s
+            LEFT JOIN collection_status cs USING (ticker)
+            ORDER BY s.ticker
+            """
+        )
+
+    return [
+        CollectionStatus(
+            ticker=r["ticker"],
+            name=r["name"],
+            last_date=r["last_date"],
+            checked_at=r["checked_at"] or datetime.now(timezone.utc),
+            status=r["status"] or "partial",
+            message=r["message"] or ("아직 한 번도 수집하지 않았습니다" if r["status"] is None else None),
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/collection-status/run-now")
+async def run_collection_now(user: CurrentUserDep, mode: str = Query("paper", pattern=r"^(paper|live)$")) -> dict[str, object]:
+    """스케줄러가 평일 16:00(KST) 에 돌리는 것과 같은 일을, 기다리지 않고 지금 합니다.
+
+    cron 시각을 당겨서 시험하는 대신 이 엔드포인트로 같은 함수를 바로 불러
+    시험합니다 — 운영 스케줄은 그대로 두고 동작만 확인할 수 있습니다.
+    """
+    auth.require(user, "market:write")
+    return await collection.run_incremental_for_all_stocks(mode)

@@ -33,6 +33,9 @@ backend/app/
   access_log.py  접근 로그에서 계좌번호를 가립니다
   kis.py       앱키 → 접근 토큰(캐시) → 일봉 · 거래일 캘린더 조회
   trading_calendar.py  거래일 계산(DB 없는 순수 함수) — 「n거래일 전」·「다음 거래일」
+  collection.py  증분 수집의 실제 로직. API 버튼과 스케줄러가 똑같이 거칩니다
+  scheduler.py  평일 16:00(KST) 자동 증분 수집. lifespan 에서 켜고 끕니다
+  discord.py   수집 끝나면 요약 전송. DISCORD_WEBHOOK_URL 없으면 조용히 건너뜀
   db.py        asyncpg 연결 풀
   schemas.py   요청 · 응답 모델 (pydantic)
 frontend/src/
@@ -40,6 +43,7 @@ frontend/src/
   Login.tsx    로그인 화면
   Profile.tsx  내 정보 — 아이디 · 비밀번호 변경 (역할은 못 바꿉니다)
   Market.tsx   시세 — 종목 고르기 · 일봉 차트 · 수집 (수집 버튼은 admin 만)
+  Freshness.tsx  신선도 — 종목별 마지막 수집 상태. 조회는 누구나, 실행은 admin 만
   LineChart.tsx 선 차트. (키 · 이름 · 점들) 만 받습니다
   Accounts.tsx 계좌 (user 는 본인 것만)
   Users.tsx    사용자 · KIS 토큰 (admin 전용)
@@ -47,12 +51,14 @@ frontend/src/
 db/init/
   01_schema.sql  stocks · daily_candles(하이퍼테이블) · trading_days ·
                  users / accounts / sessions
-  02_seed.sql    종목 마스터 8개와 수업용 계정 (일봉·캘린더는 KIS 에서 받습니다)
+  02_seed.sql    종목 마스터 8개와 수업용 계정 (일봉·캘린더·신선도는 KIS·스케줄러가 채웁니다)
 backend/tests/
   test_permissions.py  user 세션으로 관리자 API → 403. DB 없이 돕니다
   test_kis_cache.py    발급 횟수 · 만료 · 재시작 · 로그 누출
   test_daily_candles.py  저장해 둔 KIS 응답으로 파서 확인
   test_trading_calendar.py  거래일 계산기 — 공휴일 fixture 로 확인
+  test_collection.py   증분 수집 일괄 실행 — 한 종목 실패가 나머지를 안 멈추는지
+  test_discord.py      웹훅 미설정 시 건너뛰기 · 주소가 로그에 안 남는지
   test_access_log.py   계좌번호가 로그에 남지 않는지
   fixtures/daily_response.json  실제로 받은 일봉 응답 한 건
   fixtures/holiday_response.json  실제로 받은 휴장일 응답 (한글날 포함)
@@ -78,6 +84,13 @@ docs/
   (`EGW02006 모의투자 TR 이 아닙니다`). `kis.fetch_trading_calendar` 가 내부적으로
   항상 실전 도메인을 쓰고, mode 인자를 안 받는 것 자체가 그 뜻입니다. 조회만 하고
   주문은 내지 않습니다 — 2026-10-08 사용자 승인 하에 적용했습니다.
+- **Discord 웹훅 주소도 비밀입니다.** URL 안에 토큰이 박혀 있어서, 아는 사람은
+  그 주소만으로 그 채널에 글을 쓸 수 있습니다. 로그·예외·응답 어디에도 싣지 않습니다.
+  설정 안 되어 있으면(`.env` 에 값이 비어 있으면) 알림을 조용히 건너뛰고, 보내다
+  실패해도 수집 자체를 실패로 치지 않습니다 (`discord.py`).
+- **KIS 네트워크 호출의 예외는 전부 `kis.KisError` 로 모읍니다.** 타임아웃·DNS
+  실패 같은 raw 예외가 그대로 튀면, 종목 전체를 도는 배치(`collection.py`)가 한
+  종목에서 통째로 죽습니다 — 실제로 겪은 버그라 `kis._guarded` 로 막았습니다.
 - **권한 판단은 `auth.PERMISSIONS` 를 봅니다.** 화면에서 버튼을 숨기는 것은 친절일 뿐이고,
   모든 엔드포인트에서 `auth.require(user, "...")` 로 다시 막습니다.
 - **실패는 세 가지를 구분합니다.** 인증 실패(401 `invalid_credentials`),

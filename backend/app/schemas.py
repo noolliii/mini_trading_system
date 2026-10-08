@@ -37,6 +37,17 @@ class CalendarCollectResult(BaseModel):
     inserted: int
 
 
+class CollectionStatus(BaseModel):
+    """종목별 신선도. "오늘 것이 들어왔는가"를 한눈에 보려고 둡니다."""
+
+    ticker: str
+    name: str
+    last_date: date | None
+    checked_at: datetime
+    status: str  # success | partial | failed
+    message: str | None = None
+
+
 class CollectResult(BaseModel):
     """수집 결과. 받은 건수와 실제로 새로 들어간 건수를 나눠서 돌려줍니다."""
 

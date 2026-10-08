@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import Accounts from './Accounts'
+import Freshness from './Freshness'
 import Login from './Login'
 import Market from './Market'
 import Profile from './Profile'
@@ -8,7 +9,7 @@ import Users from './Users'
 import { ApiError, getMe, logout } from './api'
 import type { Me } from './api'
 
-type Tab = 'market' | 'accounts' | 'profile' | 'users'
+type Tab = 'market' | 'freshness' | 'accounts' | 'profile' | 'users'
 
 /**
  * 로그인 껍데기.
@@ -95,6 +96,9 @@ export default function App() {
         <button aria-pressed={tab === 'market'} onClick={() => setTab('market')}>
           시세
         </button>
+        <button aria-pressed={tab === 'freshness'} onClick={() => setTab('freshness')}>
+          신선도
+        </button>
         <button aria-pressed={tab === 'accounts'} onClick={() => setTab('accounts')}>
           계좌
         </button>
@@ -109,6 +113,7 @@ export default function App() {
       </nav>
 
       {tab === 'market' && <Market me={me} onSessionLost={onSessionLost} />}
+      {tab === 'freshness' && <Freshness me={me} onSessionLost={onSessionLost} />}
       {tab === 'accounts' && <Accounts me={me} onSessionLost={onSessionLost} />}
       {tab === 'profile' && (
         <Profile me={me} onUpdated={() => void refresh()} onSessionLost={onSessionLost} />
