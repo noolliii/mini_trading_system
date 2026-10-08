@@ -1,0 +1,80 @@
+name: iot
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: iot-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Seoul
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+
+  backend:
+    build:
+      context: ./backend
+    container_name: iot-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}
+      CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-5173}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-120}
+      # 앱키는 .env 에서 넘어옵니다. 여기에도 코드에도 값을 적지 않습니다
+      KIS_PAPER_APP_KEY: ${KIS_PAPER_APP_KEY:-}
+      KIS_PAPER_APP_SECRET: ${KIS_PAPER_APP_SECRET:-}
+      KIS_LIVE_APP_KEY: ${KIS_LIVE_APP_KEY:-}
+      KIS_LIVE_APP_SECRET: ${KIS_LIVE_APP_SECRET:-}
+      # Windows 바인드 마운트에서는 inotify가 안 올라와서 폴링이 필요합니다
+      WATCHFILES_FORCE_POLLING: "true"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: iot-frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE: http://localhost:${BACKEND_PORT:-8000}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    depends_on:
+      - backend
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+
+  # DB 를 눈으로 확인하는 도구입니다. 앱이 아닙니다 — 여기서 줄을 고쳐 기능을 만들지 않습니다
+  adminer:
+    image: adminer:4.8.1
+    container_name: iot-adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: timescaledb
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  timescale-data:

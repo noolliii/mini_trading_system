@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+.env.local
+
+# 비밀이 들어 있는 파일. .env.local 만 막고 .env 를 빠뜨리면 그대로 올라갑니다
+.env
