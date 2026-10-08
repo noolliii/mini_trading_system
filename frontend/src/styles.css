@@ -319,6 +319,21 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 로그인 ↔ 회원가입 전환. 버튼이지만 링크처럼 보이게 둡니다 */
+.link-button {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-decoration: underline;
+  align-self: center;
+  padding: 2px;
+}
+
+.link-button:hover {
+  color: var(--series-1);
+}
+
 /* 실패 한 줄. 인증 실패 · 세션 만료 · 권한 부족이 모두 여기로 들어옵니다 */
 .form-error {
   color: var(--critical);

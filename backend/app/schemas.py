@@ -88,6 +88,13 @@ class UserOut(BaseModel):
     account_count: int
 
 
+class SignupIn(BaseModel):
+    """회원가입. 역할을 받지 않습니다 — 역할은 서버가 항상 user 로 넣습니다."""
+
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=256)
+
+
 class UserIn(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(min_length=8, max_length=256)

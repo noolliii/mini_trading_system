@@ -114,6 +114,9 @@ const json = (body: unknown, method = 'POST'): RequestInit => ({
 export const login = (username: string, password: string) =>
   request<LoginResult>('/api/login', json({ username, password }))
 export const logout = () => request<void>('/api/logout', { method: 'POST' })
+// 가입과 동시에 로그인됩니다 — 서버가 세션 쿠키를 바로 심습니다
+export const signup = (username: string, password: string) =>
+  request<LoginResult>('/api/signup', json({ username, password }))
 export const getMe = () => request<Me>('/api/me')
 
 // ── 내 정보 ────────────────────────────────────────────

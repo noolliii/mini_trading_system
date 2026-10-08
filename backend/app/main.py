@@ -20,6 +20,7 @@ from .schemas import (
     LoginOut,
     Me,
     MeUpdate,
+    SignupIn,
     Stock,
     UserIn,
     UserOut,
@@ -74,6 +75,39 @@ async def login(body: LoginIn, response: Response) -> LoginOut:
     session_id, expires_at = await auth.create_session(user.id)
     auth.set_session_cookie(response, session_id, expires_at)
     return LoginOut(username=user.username, role=user.role, expires_at=expires_at)
+
+
+@app.post("/api/signup", response_model=LoginOut, status_code=201)
+async def signup(body: SignupIn, response: Response) -> LoginOut:
+    """누구나 부를 수 있습니다 — 로그인하지 않은 사람이 계정을 만드는 길입니다.
+
+    역할은 항상 user 입니다. admin 이 되는 길은 이 엔드포인트에 없고,
+    또 다른 admin 이 /api/users/{id} 로 역할을 바꿔줘야만 생깁니다.
+    """
+    # 받은 즉시 해시합니다. 평문은 이 줄 밖으로 나가지 않습니다
+    password_hash = auth.hash_password(body.password)
+
+    async with db.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO users (username, password_hash, role)
+                VALUES ($1, $2, 'user')
+                RETURNING id, username, role
+                """,
+                body.username,
+                password_hash,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail={
+                "code": "username_taken",
+                "message": "이미 있는 아이디입니다",
+            })
+
+    # 가입과 동시에 로그인시킵니다 — 다시 아이디·비밀번호를 치지 않게
+    session_id, expires_at = await auth.create_session(row["id"])
+    auth.set_session_cookie(response, session_id, expires_at)
+    return LoginOut(username=row["username"], role=row["role"], expires_at=expires_at)
 
 
 @app.post("/api/logout", status_code=204)

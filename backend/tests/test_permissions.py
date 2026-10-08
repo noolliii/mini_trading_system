@@ -96,3 +96,15 @@ def test_no_cookie_is_session_expired_not_forbidden(anonymous: TestClient) -> No
     res = anonymous.get("/api/me")
     assert res.status_code == 401
     assert res.json()["detail"]["code"] == "session_expired"
+
+
+def test_signup_endpoint_needs_no_session(anonymous: TestClient) -> None:
+    """회원가입은 로그인 전에 부르는 경로입니다 — 세션이 없어도 됩니다.
+
+    실제로 계정이 생기는지는 DB 가 필요해서 여기서는 안 보고,
+    "세션이 없다고 session_expired 로 막히지는 않는다" 까지만 봅니다.
+    404 가 아니라 422(짧은 비밀번호) 를 기대합니다 — 라우트는 있다는 뜻입니다.
+    """
+    res = anonymous.post("/api/signup", json={"username": "ab", "password": "x"})
+    assert res.status_code == 422
+    assert res.status_code != 401
