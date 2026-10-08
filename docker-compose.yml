@@ -42,6 +42,9 @@ services:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend/app:/app/app
+      # 테스트는 이미지에 굽지 않고 붙여서 씁니다 — 고치면 재빌드 없이 바로 돌아갑니다
+      - ./backend/tests:/app/tests
+      - ./backend/pytest.ini:/app/pytest.ini
     depends_on:
       timescaledb:
         condition: service_healthy

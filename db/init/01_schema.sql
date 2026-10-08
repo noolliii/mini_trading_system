@@ -1,53 +1,41 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
-CREATE TABLE IF NOT EXISTS devices (
-  device_id  TEXT PRIMARY KEY,
+-- ──────────────────────────────────────────────────────────────
+-- 종목 · 일봉
+-- ──────────────────────────────────────────────────────────────
+
+-- 종목 마스터. 일봉은 반드시 여기 있는 종목에만 붙습니다
+CREATE TABLE IF NOT EXISTS stocks (
+  ticker     TEXT PRIMARY KEY,                -- 종목코드 여섯 자리
   name       TEXT NOT NULL,
-  location   TEXT,
+  market     TEXT NOT NULL CHECK (market IN ('KOSPI', 'KOSDAQ')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS readings (
-  time      TIMESTAMPTZ      NOT NULL,
-  device_id TEXT             NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
-  metric    TEXT             NOT NULL,
-  value     DOUBLE PRECISION NOT NULL
+-- 이름으로 찾는 조회가 이걸 씁니다
+CREATE INDEX IF NOT EXISTS stocks_name_idx ON stocks (name);
+
+CREATE TABLE IF NOT EXISTS daily_candles (
+  time   TIMESTAMPTZ NOT NULL,                -- 거래일 00:00 (Asia/Seoul)
+  ticker TEXT   NOT NULL REFERENCES stocks(ticker) ON DELETE CASCADE,
+  open   DOUBLE PRECISION NOT NULL,
+  high   DOUBLE PRECISION NOT NULL,
+  low    DOUBLE PRECISION NOT NULL,
+  close  DOUBLE PRECISION NOT NULL,
+  volume BIGINT NOT NULL
 );
 
-SELECT create_hypertable('readings', 'time',
+-- 일봉은 하루에 한 줄이라 센서값만큼 쏟아지지 않습니다. 조각을 1년 단위로 잡습니다
+SELECT create_hypertable('daily_candles', 'time',
                          if_not_exists => TRUE,
-                         chunk_time_interval => INTERVAL '1 day');
+                         chunk_time_interval => INTERVAL '1 year');
 
--- 같은 장치/지표/시각의 중복 적재를 막아 재전송에 안전하게 만듭니다
-CREATE UNIQUE INDEX IF NOT EXISTS readings_device_metric_time_idx
-  ON readings (device_id, metric, time DESC);
-CREATE INDEX IF NOT EXISTS readings_metric_time_idx
-  ON readings (metric, time DESC);
-
-ALTER TABLE readings SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'device_id, metric'
-);
-SELECT add_compression_policy('readings', INTERVAL '7 days', if_not_exists => TRUE);
-
--- 넓은 구간 조회는 원본 대신 1분 연속 집계를 읽습니다
-CREATE MATERIALIZED VIEW IF NOT EXISTS readings_1m
-WITH (timescaledb.continuous) AS
-SELECT time_bucket('1 minute', time) AS bucket,
-       device_id,
-       metric,
-       avg(value) AS avg_value,
-       min(value) AS min_value,
-       max(value) AS max_value
-FROM readings
-GROUP BY bucket, device_id, metric
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy('readings_1m',
-  start_offset      => INTERVAL '3 hours',
-  end_offset        => INTERVAL '1 minute',
-  schedule_interval => INTERVAL '1 minute',
-  if_not_exists     => TRUE);
+-- 같은 종목·같은 날짜를 두 번 넣지 못하게 막습니다.
+-- 수집을 여러 번 돌려도 안전한 근거가 이 인덱스입니다 (ON CONFLICT 가 이걸 봅니다)
+CREATE UNIQUE INDEX IF NOT EXISTS daily_candles_ticker_time_idx
+  ON daily_candles (ticker, time DESC);
+CREATE INDEX IF NOT EXISTS daily_candles_time_idx
+  ON daily_candles (time DESC);
 
 -- ──────────────────────────────────────────────────────────────
 -- 로그인 · 권한

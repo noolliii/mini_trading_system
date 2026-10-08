@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import Accounts from './Accounts'
-import Dashboard from './Dashboard'
 import Login from './Login'
+import Market from './Market'
+import Profile from './Profile'
 import Users from './Users'
 import { ApiError, getMe, logout } from './api'
 import type { Me } from './api'
 
-type Tab = 'dashboard' | 'accounts' | 'users'
+type Tab = 'market' | 'accounts' | 'profile' | 'users'
 
 /**
  * 로그인 껍데기.
@@ -20,7 +21,7 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [checking, setChecking] = useState(true)
   const [notice, setNotice] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('dashboard')
+  const [tab, setTab] = useState<Tab>('market')
 
   const refresh = useCallback(async () => {
     try {
@@ -55,7 +56,7 @@ export default function App() {
     } finally {
       setMe(null)
       setNotice(null)
-      setTab('dashboard')
+      setTab('market')
     }
   }
 
@@ -81,7 +82,7 @@ export default function App() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>IoT 센서 대시보드</h1>
+        <h1>미니 트레이딩 시스템</h1>
         <div className="who">
           <span className={isAdmin ? 'badge badge-admin' : 'badge'}>{me.role}</span>
           <span>{me.username}</span>
@@ -91,11 +92,14 @@ export default function App() {
       </div>
 
       <nav className="tabs">
-        <button aria-pressed={tab === 'dashboard'} onClick={() => setTab('dashboard')}>
-          센서
+        <button aria-pressed={tab === 'market'} onClick={() => setTab('market')}>
+          시세
         </button>
         <button aria-pressed={tab === 'accounts'} onClick={() => setTab('accounts')}>
           계좌
+        </button>
+        <button aria-pressed={tab === 'profile'} onClick={() => setTab('profile')}>
+          내 정보
         </button>
         {isAdmin && (
           <button aria-pressed={tab === 'users'} onClick={() => setTab('users')}>
@@ -104,8 +108,11 @@ export default function App() {
         )}
       </nav>
 
-      {tab === 'dashboard' && <Dashboard onSessionLost={onSessionLost} />}
+      {tab === 'market' && <Market me={me} onSessionLost={onSessionLost} />}
       {tab === 'accounts' && <Accounts me={me} onSessionLost={onSessionLost} />}
+      {tab === 'profile' && (
+        <Profile me={me} onUpdated={() => void refresh()} onSessionLost={onSessionLost} />
+      )}
       {tab === 'users' && isAdmin && <Users meId={me.id} onSessionLost={onSessionLost} />}
     </div>
   )

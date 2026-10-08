@@ -38,17 +38,20 @@ class CurrentUser(BaseModel):
 # ──────────────────────────────────────────────────────────────
 PERMISSIONS: dict[str, set[str]] = {
     "admin": {
-        "sensor:read",
+        "market:read",
+        "market:write",
         "account:read:any",
         "account:write:any",
         "user:read",
         "user:write",
+        "user:update:own",
         "kis:token",
     },
     "user": {
-        "sensor:read",
+        "market:read",
         "account:read:own",
         "account:write:own",
+        "user:update:own",
     },
 }
 
@@ -132,6 +135,19 @@ async def authenticate(username: str, password: str) -> CurrentUser:
     return CurrentUser(id=row["id"], username=row["username"], role=row["role"])
 
 
+async def verify_current_password(user_id: int, password: str) -> bool:
+    """내 정보를 바꾸기 전에 지금 비밀번호가 맞는지 봅니다. 비교는 여기서만 합니다."""
+    async with db.acquire() as conn:
+        hashed = await conn.fetchval(
+            "SELECT password_hash FROM users WHERE id = $1", user_id
+        )
+
+    if hashed is None:
+        return False
+
+    return verify_password(password, hashed)
+
+
 # ──────────────────────────────────────────────────────────────
 # 세션
 # ──────────────────────────────────────────────────────────────
@@ -154,6 +170,16 @@ async def create_session(user_id: int) -> tuple[str, datetime]:
             )
 
     return session_id, expires_at
+
+
+async def destroy_other_sessions(user_id: int, keep_session_id: str | None) -> None:
+    """비밀번호를 바꾸면 다른 기기에 남은 세션은 끊습니다. 지금 쓰는 것만 남깁니다."""
+    async with db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM sessions WHERE user_id = $1 AND session_id <> coalesce($2, '')",
+            user_id,
+            keep_session_id,
+        )
 
 
 async def destroy_session(session_id: str) -> None:

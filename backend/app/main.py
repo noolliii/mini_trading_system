@@ -1,35 +1,36 @@
+import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import auth, db, kis
+from . import access_log, auth, db, kis
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
     AccountOut,
-    Device,
-    IngestResult,
-    LatestReading,
+    Candle,
+    CandleSeries,
+    CollectResult,
     LoginIn,
     LoginOut,
     Me,
-    Point,
-    ReadingIn,
-    Series,
-    SeriesResponse,
+    MeUpdate,
+    Stock,
     UserIn,
     UserOut,
+    UserUpdate,
 )
 
-UNITS = {"temperature": "°C", "humidity": "%", "co2": "ppm"}
+# uvicorn 은 자기 로거만 챙깁니다. 우리 모듈(app.kis 등)의 로그도 보이게 켭니다
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 
-# 구간이 길어지면 원본 대신 1분 연속 집계를 읽습니다
-RAW_WINDOW_HOURS = 6
+# 계좌번호가 URL 에 실려 접근 로그로 새는 것을 막습니다
+access_log.install()
 
 
 @asynccontextmanager
@@ -41,7 +42,7 @@ async def lifespan(app: FastAPI):
         await db.disconnect()
 
 
-app = FastAPI(title="IoT Sensor API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Mini Trading System API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,6 +97,55 @@ async def me(user: CurrentUserDep) -> Me:
     )
 
 
+@app.patch("/api/me", response_model=Me)
+async def update_me(
+    body: MeUpdate,
+    user: CurrentUserDep,
+    session_id: Annotated[str | None, Cookie()] = None,
+) -> Me:
+    """내 정보만 바꿉니다. 대상은 항상 세션의 주인이고, 역할은 바꿀 수 없습니다."""
+    auth.require(user, "user:update:own")
+
+    # 쿠키를 훔쳐 쓰는 경우를 막습니다. 바꾸기 전에 지금 비밀번호를 한 번 더 받습니다
+    if not await auth.verify_current_password(user.id, body.current_password):
+        raise auth.auth_failed()
+
+    username = body.username or user.username
+    # 받은 즉시 해시합니다. 평문은 이 줄 밖으로 나가지 않습니다
+    password_hash = auth.hash_password(body.new_password) if body.new_password else None
+
+    async with db.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                UPDATE users
+                   SET username = $2,
+                       password_hash = coalesce($3, password_hash)
+                 WHERE id = $1
+                RETURNING username, role
+                """,
+                user.id,
+                username,
+                password_hash,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail={
+                "code": "username_taken",
+                "message": "이미 있는 아이디입니다",
+            })
+
+    if body.new_password:
+        # 비밀번호가 바뀌었으니 다른 기기에 남아 있던 세션은 끊습니다
+        await auth.destroy_other_sessions(user.id, session_id)
+
+    return Me(
+        id=user.id,
+        username=row["username"],
+        role=row["role"],
+        permissions=sorted(auth.PERMISSIONS.get(row["role"], set())),
+    )
+
+
 # ══════════════════════════════════════════════════════════════
 # 사용자 — admin 만
 # ══════════════════════════════════════════════════════════════
@@ -144,6 +194,60 @@ async def create_user(body: UserIn, user: CurrentUserDep) -> UserOut:
             })
 
     return UserOut(**dict(row), account_count=0)
+
+
+@app.patch("/api/users/{user_id}", response_model=UserOut)
+async def update_user(user_id: int, body: UserUpdate, user: CurrentUserDep) -> UserOut:
+    """admin 이 남의 아이디 · 역할 · 비밀번호를 고칩니다."""
+    auth.require(user, "user:write")
+
+    if body.role is not None and user_id == user.id:
+        # 마지막 admin 이 스스로 user 로 내려가 잠기는 것을 막습니다
+        raise HTTPException(status_code=409, detail={
+            "code": "cannot_change_own_role",
+            "message": "자기 역할은 바꿀 수 없습니다",
+        })
+
+    # 받은 즉시 해시합니다. 평문은 이 줄 밖으로 나가지 않습니다
+    password_hash = auth.hash_password(body.new_password) if body.new_password else None
+
+    async with db.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                UPDATE users
+                   SET username = coalesce($2, username),
+                       role = coalesce($3, role),
+                       password_hash = coalesce($4, password_hash)
+                 WHERE id = $1
+                RETURNING id, username, role, created_at
+                """,
+                user_id,
+                body.username,
+                body.role,
+                password_hash,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail={
+                "code": "username_taken",
+                "message": "이미 있는 아이디입니다",
+            })
+
+        if row is None:
+            raise HTTPException(status_code=404, detail={
+                "code": "user_not_found",
+                "message": "없는 사용자입니다",
+            })
+
+        account_count = await conn.fetchval(
+            "SELECT count(*)::int FROM accounts WHERE user_id = $1", user_id
+        )
+
+    if body.new_password or body.role is not None:
+        # 비밀번호나 역할이 바뀌었으면 그 사람이 들고 있던 세션은 전부 끊습니다
+        await auth.destroy_other_sessions(user_id, None)
+
+    return UserOut(**dict(row), account_count=account_count)
 
 
 @app.delete("/api/users/{user_id}", status_code=204)
@@ -269,134 +373,138 @@ async def delete_account(account_no: str, user: CurrentUserDep) -> None:
 async def issue_kis_token(
     user: CurrentUserDep,
     mode: str = Query("paper", pattern=r"^(paper|live)$"),
+    force: bool = Query(False, description="캐시를 무시하고 새로 발급합니다"),
 ) -> kis.TokenIssue:
+    """만료 전이면 캐시한 토큰을 그대로 돌려줍니다 — 응답의 cached 로 구분합니다."""
     auth.require(user, "kis:token")
     try:
-        return await kis.request_access_token(mode)
+        return await kis.request_access_token(mode, force=force)
     except kis.KisError as e:
         raise HTTPException(status_code=502, detail={"code": "kis_error", "message": str(e)})
 
 
 # ══════════════════════════════════════════════════════════════
-# 센서 — 로그인한 사람만 읽습니다
+# 종목 · 일봉
 # ══════════════════════════════════════════════════════════════
 
 
-@app.get("/api/devices", response_model=list[Device])
-async def list_devices(user: CurrentUserDep) -> list[Device]:
-    auth.require(user, "sensor:read")
-    async with db.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT device_id, name, location FROM devices ORDER BY device_id"
-        )
-    return [Device(**dict(r)) for r in rows]
-
-
-@app.get("/api/metrics", response_model=list[str])
-async def list_metrics(user: CurrentUserDep) -> list[str]:
-    auth.require(user, "sensor:read")
-    async with db.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT metric FROM readings ORDER BY metric")
-    return [r["metric"] for r in rows]
-
-
-@app.post("/api/readings", response_model=IngestResult, status_code=201)
-async def ingest(readings: list[ReadingIn]) -> IngestResult:
-    """센서가 직접 넣는 경로라 세션을 요구하지 않습니다.
-
-    장치 인증(키 헤더)은 다음 주제입니다. 지금은 교내 망 안에서만 열립니다.
-    """
-    if not readings:
-        raise HTTPException(status_code=400, detail="readings must not be empty")
-
-    now = datetime.now(timezone.utc)
-    records = [
-        (r.time or now, r.device_id, r.metric, r.value) for r in readings
-    ]
+@app.get("/api/stocks", response_model=list[Stock])
+async def list_stocks(
+    user: CurrentUserDep,
+    q: str | None = Query(None, max_length=64, description="종목코드 또는 종목명의 일부"),
+) -> list[Stock]:
+    """종목 검색. 로그인한 사람은 누구나 읽습니다."""
+    auth.require(user, "market:read")
 
     async with db.acquire() as conn:
-        async with conn.transaction():
-            # 등록되지 않은 장치는 즉시 만들어 둡니다 (FK 위반 방지)
-            await conn.executemany(
+        if q:
+            rows = await conn.fetch(
                 """
-                INSERT INTO devices (device_id, name)
-                VALUES ($1, $1)
-                ON CONFLICT (device_id) DO NOTHING
+                SELECT ticker, name, market FROM stocks
+                WHERE ticker LIKE $1 OR name ILIKE $1
+                ORDER BY ticker
                 """,
-                [(r.device_id,) for r in readings],
+                f"%{q}%",
             )
-            result = await conn.executemany(
-                """
-                INSERT INTO readings (time, device_id, metric, value)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (device_id, metric, time) DO UPDATE
-                SET value = EXCLUDED.value
-                """,
-                records,
-            )
-    del result
-    return IngestResult(inserted=len(records))
+        else:
+            rows = await conn.fetch("SELECT ticker, name, market FROM stocks ORDER BY ticker")
+
+    return [Stock(**dict(r)) for r in rows]
 
 
-@app.get("/api/latest", response_model=list[LatestReading])
-async def latest(user: CurrentUserDep, metric: str | None = None) -> list[LatestReading]:
-    auth.require(user, "sensor:read")
+@app.get("/api/candles", response_model=CandleSeries)
+async def candles(
+    user: CurrentUserDep,
+    ticker: str = Query(min_length=6, max_length=6, pattern=r"^\d{6}$"),
+    days: int = Query(365, ge=1, le=3650),
+) -> CandleSeries:
+    """저장해 둔 일봉을 읽습니다. KIS 로 나가지 않습니다 — DB 만 봅니다."""
+    auth.require(user, "market:read")
+
     async with db.acquire() as conn:
+        name = await conn.fetchval("SELECT name FROM stocks WHERE ticker = $1", ticker)
+        if name is None:
+            raise HTTPException(status_code=404, detail={
+                "code": "stock_not_found",
+                "message": "종목 마스터에 없는 종목코드입니다",
+            })
+
         rows = await conn.fetch(
             """
-            SELECT DISTINCT ON (r.device_id, r.metric)
-                   r.device_id, d.name, r.metric, r.value, r.time
-            FROM readings r
-            JOIN devices d USING (device_id)
-            WHERE ($1::text IS NULL OR r.metric = $1)
-              AND r.time > now() - INTERVAL '7 days'
-            ORDER BY r.device_id, r.metric, r.time DESC
+            SELECT time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE ticker = $1 AND time > now() - make_interval(days => $2)
+            ORDER BY time
             """,
-            metric,
+            ticker,
+            days,
         )
-    return [LatestReading(**dict(r)) for r in rows]
+
+    return CandleSeries(
+        ticker=ticker,
+        name=name,
+        candles=[Candle(**dict(r)) for r in rows],
+    )
 
 
-@app.get("/api/series", response_model=SeriesResponse)
-async def series(
+@app.post("/api/stocks/{ticker}/collect", response_model=CollectResult)
+async def collect_candles(
+    ticker: str,
     user: CurrentUserDep,
-    metric: str = Query(..., min_length=1),
-    hours: int = Query(24, ge=1, le=24 * 30),
-) -> SeriesResponse:
-    auth.require(user, "sensor:read")
-    use_raw = hours <= RAW_WINDOW_HOURS
+    mode: str = Query("paper", pattern=r"^(paper|live)$"),
+    days: int = Query(365, ge=1, le=3650),
+) -> CollectResult:
+    """KIS 에서 일봉을 받아 적재합니다. admin 만 — 외부로 나가는 호출이기 때문입니다.
 
-    if use_raw:
-        sql = """
-            SELECT r.device_id, d.name, r.time AS t, r.value AS v
-            FROM readings r
-            JOIN devices d USING (device_id)
-            WHERE r.metric = $1 AND r.time > now() - make_interval(hours => $2)
-            ORDER BY r.device_id, r.time
-        """
-    else:
-        sql = """
-            SELECT a.device_id, d.name, a.bucket AS t, a.avg_value AS v
-            FROM readings_1m a
-            JOIN devices d USING (device_id)
-            WHERE a.metric = $1 AND a.bucket > now() - make_interval(hours => $2)
-            ORDER BY a.device_id, a.bucket
-        """
+    같은 종목·같은 날짜는 덮어씁니다. 여러 번 돌려도 줄이 늘지 않습니다.
+    """
+    auth.require(user, "market:write")
 
     async with db.acquire() as conn:
-        rows = await conn.fetch(sql, metric, hours)
+        exists = await conn.fetchval("SELECT 1 FROM stocks WHERE ticker = $1", ticker)
+    if exists is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "stock_not_found",
+            "message": "종목 마스터에 없는 종목코드입니다",
+        })
 
-    grouped: dict[str, Series] = {}
-    for r in rows:
-        s = grouped.get(r["device_id"])
-        if s is None:
-            s = Series(device_id=r["device_id"], name=r["name"], points=[])
-            grouped[r["device_id"]] = s
-        s.points.append(Point(t=r["t"], v=r["v"]))
+    end = datetime.now(kis.KST).date()
+    start = end - timedelta(days=days)
 
-    return SeriesResponse(
-        metric=metric,
-        unit=UNITS.get(metric),
-        resolution="raw" if use_raw else "1m",
-        series=list(grouped.values()),
+    try:
+        fetched = await kis.fetch_daily_candles(ticker, mode, start, end)
+    except kis.KisError as e:
+        raise HTTPException(status_code=502, detail={"code": "kis_error", "message": str(e)})
+
+    if not fetched:
+        return CollectResult(ticker=ticker, mode=mode, fetched=0, inserted=0)
+
+    async with db.acquire() as conn:
+        before = await conn.fetchval(
+            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
+        )
+        await conn.executemany(
+            """
+            INSERT INTO daily_candles (time, ticker, open, high, low, close, volume)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (ticker, time) DO UPDATE
+               SET open = excluded.open, high = excluded.high, low = excluded.low,
+                   close = excluded.close, volume = excluded.volume
+            """,
+            [
+                (c.time, ticker, c.open, c.high, c.low, c.close, c.volume)
+                for c in fetched
+            ],
+        )
+        after = await conn.fetchval(
+            "SELECT count(*) FROM daily_candles WHERE ticker = $1", ticker
+        )
+
+    return CollectResult(
+        ticker=ticker,
+        mode=mode,
+        fetched=len(fetched),
+        inserted=after - before,
+        first=fetched[0].time,
+        last=fetched[-1].time,
     )

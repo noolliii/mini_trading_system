@@ -1,27 +1,17 @@
-INSERT INTO devices (device_id, name, location) VALUES
-  ('dev-001', '거실 센서',   '거실'),
-  ('dev-002', '침실 센서',   '침실'),
-  ('dev-003', '베란다 센서', '베란다')
-ON CONFLICT (device_id) DO NOTHING;
-
--- 최근 24시간, 1분 간격의 더미 데이터 (일주기 사인파 + 노이즈)
-INSERT INTO readings (time, device_id, metric, value)
-SELECT t,
-       d.device_id,
-       m.metric,
-       round((m.base
-              + m.amp * sin(extract(epoch FROM t) / 86400.0 * 2 * pi() + d.phase)
-              + (random() - 0.5) * m.noise)::numeric, 2)::double precision
-FROM generate_series(now() - INTERVAL '24 hours', now(), INTERVAL '1 minute') AS t
-CROSS JOIN (VALUES ('dev-001', 0.0), ('dev-002', 0.6), ('dev-003', 1.2))
-       AS d(device_id, phase)
-CROSS JOIN (VALUES ('temperature', 23.0,  3.0,  0.6),
-                   ('humidity',    48.0,  8.0,  1.5),
-                   ('co2',        620.0, 120.0, 30.0))
-       AS m(metric, base, amp, noise)
-ON CONFLICT DO NOTHING;
-
-CALL refresh_continuous_aggregate('readings_1m', NULL, NULL);
+-- ──────────────────────────────────────────────────────────────
+-- 종목 마스터
+-- 실제 종목코드입니다. 일봉은 여기 넣지 않습니다 — KIS 에서 받아 채웁니다.
+-- ──────────────────────────────────────────────────────────────
+INSERT INTO stocks (ticker, name, market) VALUES
+  ('005930', '삼성전자',     'KOSPI'),
+  ('000660', 'SK하이닉스',   'KOSPI'),
+  ('035420', 'NAVER',        'KOSPI'),
+  ('035720', '카카오',       'KOSPI'),
+  ('005380', '현대차',       'KOSPI'),
+  ('068270', '셀트리온',     'KOSPI'),
+  ('247540', '에코프로비엠', 'KOSDAQ'),
+  ('091990', '셀트리온헬스케어', 'KOSDAQ')
+ON CONFLICT (ticker) DO NOTHING;
 
 -- ──────────────────────────────────────────────────────────────
 -- 수업용 계정 두 개
@@ -33,6 +23,8 @@ INSERT INTO users (username, password_hash, role) VALUES
   ('hong',  crypt('hong1234',  gen_salt('bf', 12)), 'user')
 ON CONFLICT (username) DO NOTHING;
 
+-- 아래 계좌번호 두 개는 수업용으로 지어낸 값입니다. 실제 계좌가 아닙니다.
+-- 실계좌번호는 시드에도 커밋에도 넣지 않습니다 — 화면에서 직접 등록하세요.
 INSERT INTO accounts (account_no, user_id, broker, mode)
 SELECT '50012345-01', id, '한국투자증권', 'paper' FROM users WHERE username = 'admin'
 ON CONFLICT (account_no) DO NOTHING;

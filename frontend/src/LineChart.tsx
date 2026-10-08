@@ -1,6 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 
-import type { Series } from './api'
+/** 차트가 받는 모양. 무엇을 그리든 (키 · 이름 · 점들) 셋이면 됩니다. */
+export type ChartPoint = { t: string; v: number }
+export type ChartSeries = { key: string; name: string; points: ChartPoint[] }
 
 /**
  * 범주형 팔레트 고정 슬롯. 순서 자체가 색약 안전성을 담보하므로 돌려쓰지 않습니다.
@@ -13,7 +15,7 @@ const HEIGHT = 320
 const M = { top: 12, right: 78, bottom: 28, left: 52 }
 
 type Props = {
-  series: Series[]
+  series: ChartSeries[]
   unit: string | null
 }
 
@@ -109,7 +111,7 @@ export default function LineChart({ series, unit }: Props) {
     // 선 끝 직접 레이블 — 겹치면 아래로 밀어냅니다
     const ends = shown
       .map((s, i) => ({
-        key: s.device_id,
+        key: s.key,
         v: values[i][values[i].length - 1],
         y: yOf(values[i][values[i].length - 1]),
       }))
@@ -143,7 +145,7 @@ export default function LineChart({ series, unit }: Props) {
       {/* 색만으로 구분되지 않도록 범례와 선 끝 레이블을 함께 둡니다 */}
       <div className="legend">
         {shown.map((s, i) => (
-          <span className="legend-item" key={s.device_id}>
+          <span className="legend-item" key={s.key}>
             <span className="swatch" style={{ background: SERIES_COLORS[i] }} />
             {s.name}
           </span>
@@ -213,7 +215,7 @@ export default function LineChart({ series, unit }: Props) {
 
           {model.paths.map((d, i) => (
             <path
-              key={shown[i].device_id}
+              key={shown[i].key}
               d={d}
               fill="none"
               stroke={SERIES_COLORS[i]}
@@ -227,7 +229,7 @@ export default function LineChart({ series, unit }: Props) {
           {hover &&
             hover.rows.map((r, i) => (
               <circle
-                key={shown[i].device_id}
+                key={shown[i].key}
                 cx={hover.px}
                 cy={model.yOf(r.v)}
                 r={4.5}
