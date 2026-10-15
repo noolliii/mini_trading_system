@@ -1,18 +1,23 @@
+import csv
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Annotated
 
 import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import access_log, auth, collection, db, kis, scheduler
+from . import access_log, auth, backtest, collection, db, kis, scheduler, selection, universe
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
     AccountOut,
+    BacktestPoint,
+    BacktestResult,
+    BacktestSummary,
     CalendarCollectResult,
     Candle,
     CandleSeries,
@@ -24,11 +29,21 @@ from .schemas import (
     MeUpdate,
     SignupIn,
     Stock,
+    StockIn,
+    Top5Pick,
+    Top5Point,
+    Top5Result,
+    Top5Summary,
     TradingDay,
+    UniverseImportResult,
+    UniverseResult,
+    UniverseTickerSummary,
     UserIn,
     UserOut,
     UserUpdate,
 )
+
+KOSPI100_CSV = Path(__file__).parent / "data" / "kospi100.csv"
 
 # uvicorn 은 자기 로거만 챙깁니다. 우리 모듈(app.kis 등)의 로그도 보이게 켭니다
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
@@ -451,6 +466,32 @@ async def list_stocks(
     return [Stock(**dict(r)) for r in rows]
 
 
+@app.post("/api/stocks", response_model=Stock, status_code=201)
+async def create_stock(body: StockIn, user: CurrentUserDep) -> Stock:
+    """종목을 하나씩 직접 더합니다. kospi100.csv 재가져오기 없이도 종목을 늘릴 수 있는 길입니다."""
+    auth.require(user, "market:write")
+
+    async with db.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO stocks (ticker, name, market)
+                VALUES ($1, $2, $3)
+                RETURNING ticker, name, market
+                """,
+                body.ticker,
+                body.name,
+                body.market,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail={
+                "code": "ticker_exists",
+                "message": "이미 있는 종목코드입니다",
+            })
+
+    return Stock(**dict(row))
+
+
 @app.get("/api/candles", response_model=CandleSeries)
 async def candles(
     user: CurrentUserDep,
@@ -675,3 +716,169 @@ async def run_collection_now(user: CurrentUserDep, mode: str = Query("paper", pa
     """
     auth.require(user, "market:write")
     return await collection.run_incremental_for_all_stocks(mode)
+
+
+# ══════════════════════════════════════════════════════════════
+# 백테스트 — 낮(장중) vs 밤(종가 배팅)
+# ══════════════════════════════════════════════════════════════
+
+
+async def _fetch_candles(conn: asyncpg.Connection, ticker: str, days: int) -> list[Candle]:
+    rows = await conn.fetch(
+        """
+        SELECT time, open, high, low, close, volume
+        FROM daily_candles
+        WHERE ticker = $1 AND time > now() - make_interval(days => $2)
+        ORDER BY time
+        """,
+        ticker,
+        days,
+    )
+    return [Candle(**dict(r)) for r in rows]
+
+
+@app.get("/api/backtest/day-night", response_model=BacktestResult)
+async def backtest_day_night(
+    user: CurrentUserDep,
+    ticker: str = Query(min_length=6, max_length=6, pattern=r"^\d{6}$"),
+    days: int = Query(365, ge=2, le=3650),
+) -> BacktestResult:
+    """낮(장중) · 밤(종가 배팅) · 단순보유 누적수익률 비교. DB 에 적재된 일봉만 봅니다."""
+    auth.require(user, "market:read")
+
+    async with db.acquire() as conn:
+        name = await conn.fetchval("SELECT name FROM stocks WHERE ticker = $1", ticker)
+        if name is None:
+            raise HTTPException(status_code=404, detail={
+                "code": "stock_not_found",
+                "message": "종목 마스터에 없는 종목코드입니다",
+            })
+        candles = await _fetch_candles(conn, ticker, days)
+
+    result = backtest.compute_day_night(candles)
+
+    return BacktestResult(
+        ticker=ticker,
+        name=name,
+        points=[BacktestPoint(**vars(p)) for p in result.points],
+        summary=BacktestSummary(**vars(result.summary)),
+    )
+
+
+@app.post("/api/stocks/import-universe", response_model=UniverseImportResult)
+async def import_universe(user: CurrentUserDep) -> UniverseImportResult:
+    """번들에 들어 있는 코스피 100 종목 리스트를 stocks 테이블에 더합니다.
+
+    DDL 이 아니라 데이터 삽입이라 db/init/ 을 건드리지 않고, 볼륨을 다시 만들
+    필요도 없습니다. 이미 있는 종목(기존 8개 포함)은 이름 · 시장 구분을
+    그대로 두고 건드리지 않습니다 — 새 티커만 더합니다. 실제 일봉은 여기서
+    받지 않습니다 — 「수집 현황」탭의 "지금 전체 증분 수집 실행"이 새로 추가된
+    종목까지 포함해 자동으로 받아옵니다.
+    """
+    auth.require(user, "market:write")
+
+    with KOSPI100_CSV.open(encoding="utf-8") as f:
+        rows = [(r["symbol"], r["name"]) for r in csv.DictReader(f)]
+
+    async with db.acquire() as conn:
+        before = await conn.fetchval("SELECT count(*) FROM stocks")
+        await conn.executemany(
+            """
+            INSERT INTO stocks (ticker, name, market)
+            VALUES ($1, $2, 'KOSPI')
+            ON CONFLICT (ticker) DO NOTHING
+            """,
+            rows,
+        )
+        after = await conn.fetchval("SELECT count(*) FROM stocks")
+
+    return UniverseImportResult(total=len(rows), inserted=after - before)
+
+
+@app.get("/api/backtest/universe", response_model=UniverseResult)
+async def backtest_universe(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=2, le=3650),
+    tickers: str | None = Query(None, description="콤마로 구분한 종목코드. 비우면 전체 종목"),
+) -> UniverseResult:
+    """적재된 종목(코스피 100 포함)의 동일가중 낮 · 밤 · 단순보유 비교.
+
+    tickers 를 주면 그 종목들만 골라서 평균을 냅니다 — 유니버스 화면의
+    종목 선택 체크박스가 이걸 씁니다. 비우면 지금까지처럼 전체 종목입니다.
+    """
+    auth.require(user, "market:read")
+
+    wanted = {t.strip() for t in tickers.split(",") if t.strip()} if tickers else None
+
+    async with db.acquire() as conn:
+        stock_rows = await conn.fetch("SELECT ticker, name FROM stocks ORDER BY ticker")
+        candle_rows = await conn.fetch(
+            """
+            SELECT ticker, time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE time > now() - make_interval(days => $1)
+            ORDER BY ticker, time
+            """,
+            days,
+        )
+
+    names = {
+        r["ticker"]: r["name"] for r in stock_rows if wanted is None or r["ticker"] in wanted
+    }
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        if wanted is not None and r["ticker"] not in wanted:
+            continue
+        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+
+    result = universe.compute_universe(
+        {ticker: (names.get(ticker, ticker), candles) for ticker, candles in by_ticker.items()}
+    )
+
+    return UniverseResult(
+        tickers=[UniverseTickerSummary(**vars(s)) for s in result.tickers],
+        points=[BacktestPoint(**vars(p)) for p in result.points],
+    )
+
+
+@app.get("/api/backtest/top5", response_model=Top5Result)
+async def backtest_top5(
+    user: CurrentUserDep,
+    strategy: str = Query(pattern=r"^(momentum|mean_reversion|volume_surge|rolling_edge)$"),
+    days: int = Query(365, ge=30, le=3650),
+    k: int = Query(5, ge=1, le=20),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+) -> Top5Result:
+    """매일 유니버스에서 점수 상위 k종목을 골라 종가 배팅했을 때의 성과.
+
+    점수는 그날 자신의 데이터(모멘텀 · 역추세 · 거래량폭발) 또는 그 전까지의
+    과거 밤수익률(롤링엣지)만 씁니다 — 미래의 값을 들여다보지 않습니다.
+    """
+    auth.require(user, "market:read")
+
+    async with db.acquire() as conn:
+        candle_rows = await conn.fetch(
+            """
+            SELECT ticker, time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE time > now() - make_interval(days => $1)
+            ORDER BY ticker, time
+            """,
+            days,
+        )
+
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+
+    try:
+        result = selection.backtest_top_k(by_ticker, strategy, k=k, cost=cost)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "invalid_strategy", "message": str(e)})
+
+    return Top5Result(
+        strategy=result.strategy,
+        points=[Top5Point(**vars(p)) for p in result.points],
+        summary=Top5Summary(**vars(result.summary)),
+        picks=[Top5Pick(**vars(p)) for p in result.picks],
+    )

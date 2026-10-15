@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>미니 트레이딩 아키텍처</title>
+<style>
+  :root{
+    --bg:#F5F6F2;
+    --surface:#FFFFFF;
+    --surface-2:#EAEDE6;
+    --ink:#16261E;
+    --muted:#5B6B5F;
+    --border:#D9DFD3;
+    --accent-up:#B8382D;
+    --accent-up-soft:#F4DEDA;
+    --accent-down:#2C5A93;
+    --accent-down-soft:#DCE6F1;
+    --accent-neutral:#8A6E2E;
+    --accent-neutral-soft:#EDE4CC;
+    --shadow:0 1px 2px rgba(22,38,30,.07), 0 10px 28px rgba(22,38,30,.06);
+    --radius:12px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#10151A; --surface:#171E23; --surface-2:#1D252B; --ink:#E7ECE6;
+      --muted:#93A399; --border:#2A333A; --accent-up:#E2695C; --accent-up-soft:#3A2622;
+      --accent-down:#6FA0DA; --accent-down-soft:#1E2C3C; --accent-neutral:#CBA857; --accent-neutral-soft:#3A331E;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; background:var(--bg); }
+  body{
+    font-family:'IBM Plex Sans', -apple-system, 'Noto Sans KR', sans-serif;
+    color:var(--ink);
+  }
+  img{ max-width:100%; }
+
+  .page{
+    max-width:1040px; margin:0 auto; padding:40px 20px 64px;
+  }
+
+  .eyebrow{
+    font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--accent-down); margin:0 0 10px;
+  }
+  h1{
+    font-family:'IBM Plex Mono', monospace; font-size:clamp(22px,4vw,30px);
+    font-weight:700; margin:0 0 10px; line-height:1.25;
+  }
+  .lede{ color:var(--muted); font-size:15px; line-height:1.65; max-width:640px; margin:0 0 36px;}
+
+  h2{
+    font-family:'IBM Plex Mono', monospace; font-size:17px; font-weight:700;
+    margin:0 0 4px; display:flex; align-items:baseline; gap:10px;
+  }
+  h2 .num{ color:var(--muted); font-weight:400; }
+  .section-note{ color:var(--muted); font-size:13.5px; margin:0 0 20px; max-width:620px; line-height:1.6;}
+
+  section{ margin-bottom:52px; }
+
+  figure{ margin:0; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px 18px 6px; }
+  figure svg{ display:block; width:100%; height:auto; }
+  figcaption{ font-size:13px; color:var(--muted); line-height:1.6; padding:14px 6px 16px; border-top:1px solid var(--border); margin-top:10px; }
+  figcaption b{ color:var(--ink); font-weight:600; }
+  .swatch{ display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .sw-up{ background:var(--accent-up); } .sw-down{ background:var(--accent-down); } .sw-neutral{ background:var(--accent-neutral); }
+
+  .tree-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .tree-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px 20px 20px; }
+  .tree-head{ font-family:'IBM Plex Mono', monospace; font-size:13.5px; font-weight:700; color:var(--ink); margin:0 0 4px; }
+  .tree-path{ font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted); margin:0 0 14px; }
+  .file-row{ display:grid; grid-template-columns:168px 1fr; gap:12px; padding:8px 0; border-top:1px solid var(--border); align-items:start; }
+  .file-row:first-of-type{ border-top:none; padding-top:0; }
+  .file-name{ font-family:'IBM Plex Mono', monospace; font-size:12.5px; font-weight:600; color:var(--ink); word-break:break-all; }
+  .file-desc{ font-size:13px; color:var(--muted); line-height:1.55; }
+  .badge{
+    display:inline-block; font-family:'IBM Plex Mono', monospace; font-size:10px; font-weight:600;
+    padding:1px 6px; border-radius:5px; background:var(--accent-neutral-soft); color:var(--accent-neutral);
+    margin-left:6px; vertical-align:1px; white-space:nowrap;
+  }
+
+  .sub-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:20px; }
+
+  .rules{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+  .rule-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; box-shadow:var(--shadow); }
+  .rule-card .tag{ font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--accent-up); font-weight:700; margin-bottom:6px; }
+  .rule-card.b .tag{ color:var(--accent-down); }
+  .rule-card.c .tag{ color:var(--accent-neutral); }
+  .rule-card p{ margin:0; font-size:13px; color:var(--muted); line-height:1.55; }
+  .rule-card p b{ color:var(--ink); font-weight:600; }
+
+  .nrect{ fill:var(--surface); stroke:var(--ink); stroke-width:1.4; }
+  .nrect.db{ fill:var(--surface-2); stroke:var(--ink); stroke-width:2; }
+  .ntitle{ font-family:'IBM Plex Mono',monospace; font-weight:700; font-size:14px; fill:var(--ink); text-anchor:middle; }
+  .nsub{ font-family:'IBM Plex Mono',monospace; font-weight:400; font-size:10.5px; fill:var(--muted); text-anchor:middle; }
+  .elabel{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; fill:var(--muted); text-anchor:middle; }
+  .fill-up{ fill:var(--accent-up); } .fill-down{ fill:var(--accent-down); }
+  .fill-neutral{ fill:var(--accent-neutral); } .fill-muted{ fill:var(--muted); }
+  .e-up{ stroke:var(--accent-up); stroke-width:2; fill:none; }
+  .e-down{ stroke:var(--accent-down); stroke-width:2; fill:none; }
+  .e-neutral{ stroke:var(--accent-neutral); stroke-width:1.75; fill:none; stroke-dasharray:5 4; }
+  .e-muted{ stroke:var(--muted); stroke-width:1.5; fill:none; stroke-dasharray:4 3; }
+
+  @media (max-width:700px){
+    .tree-grid, .sub-grid, .rules{ grid-template-columns:1fr; }
+    .file-row{ grid-template-columns:1fr; gap:3px; }
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+</head>
+<body>
+<div class="page">
+  <p class="eyebrow">mini_trading_system</p>
+  <h1>아키텍처 &amp; 폴더 구성</h1>
+  <p class="lede">
+    KIS 일봉을 TimescaleDB 에 쌓고(수집, 빨강) React 화면이 그 값을 읽는(조회, 파랑)
+    두 경로가 같은 DB 에서 만납니다. 아래는 그 흐름과, 실제로 커밋된 폴더 구성입니다.
+  </p>
+
+  <section>
+    <h2><span class="num">01</span> 데이터 흐름</h2>
+    <p class="section-note">
+      <span class="swatch sw-up"></span>수집(쓰기) ·
+      <span class="swatch sw-down"></span>조회(읽기) ·
+      <span class="swatch sw-neutral"></span>best-effort(실패해도 무시) — 세 경로를 색으로 구분했습니다.
+    </p>
+    <figure>
+      <svg viewBox="0 0 1160 600" role="img" aria-label="scheduler.py와 관리자 버튼이 collection.py를 깨우면 kis.py가 KIS API에서 일봉·거래일을 받아 TimescaleDB에 UPSERT 하고, discord.py가 결과를 웹훅으로 알립니다(실패해도 수집은 성공 처리). React 화면은 api.ts로 main.py를 거쳐 같은 DB를 조회하며, main.py는 auth.py의 PERMISSIONS 표로 매 요청을 다시 검사합니다.">
+        <defs>
+          <marker id="aUp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" class="fill-up"/></marker>
+          <marker id="aDown" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" class="fill-down"/></marker>
+          <marker id="aNeutral" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" class="fill-neutral"/></marker>
+          <marker id="aMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" class="fill-muted"/></marker>
+        </defs>
+
+        <!-- triggers -->
+        <rect class="nrect" x="330" y="20" width="200" height="50" rx="10"/>
+        <text class="ntitle" x="430" y="42">scheduler.py</text>
+        <text class="nsub" x="430" y="58">평일 16:00 KST 자동 실행</text>
+
+        <rect class="nrect" x="600" y="20" width="260" height="50" rx="10"/>
+        <text class="ntitle" x="730" y="42">관리자 수집 버튼</text>
+        <text class="nsub" x="730" y="58">Market.tsx · admin 전용</text>
+
+        <!-- main row -->
+        <rect class="nrect" x="30" y="150" width="180" height="65" rx="10"/>
+        <text class="ntitle" x="120" y="176">KIS 증권 API</text>
+        <text class="nsub" x="120" y="192">일봉 · 거래일 캘린더</text>
+
+        <rect class="nrect" x="270" y="150" width="180" height="65" rx="10"/>
+        <text class="ntitle" x="360" y="176">kis.py</text>
+        <text class="nsub" x="360" y="192">토큰 캐시 · KisError</text>
+
+        <rect class="nrect" x="510" y="150" width="210" height="65" rx="10"/>
+        <text class="ntitle" x="615" y="176">collection.py</text>
+        <text class="nsub" x="615" y="192">증분 수집 오케스트레이터</text>
+
+        <rect class="nrect" x="780" y="150" width="170" height="65" rx="10"/>
+        <text class="ntitle" x="865" y="176">discord.py</text>
+        <text class="nsub" x="865" y="192">수집 요약 알림</text>
+
+        <rect class="nrect" x="1000" y="150" width="130" height="65" rx="10"/>
+        <text class="ntitle" x="1065" y="176">Discord</text>
+        <text class="nsub" x="1065" y="192">웹훅 URL 비공개</text>
+
+        <!-- db -->
+        <rect class="nrect db" x="380" y="330" width="360" height="75" rx="10"/>
+        <text class="ntitle" x="560" y="356">TimescaleDB</text>
+        <text class="nsub" x="560" y="372">daily_candles(하이퍼테이블) · trading_days</text>
+        <text class="nsub" x="560" y="386">users · accounts · sessions</text>
+
+        <!-- bottom row -->
+        <rect class="nrect" x="210" y="470" width="190" height="60" rx="10"/>
+        <text class="ntitle" x="305" y="495">auth.py</text>
+        <text class="nsub" x="305" y="511">PERMISSIONS 표</text>
+
+        <rect class="nrect" x="450" y="470" width="220" height="60" rx="10"/>
+        <text class="ntitle" x="560" y="495">main.py (FastAPI)</text>
+        <text class="nsub" x="560" y="511">auth.require(user, ...)</text>
+
+        <rect class="nrect" x="760" y="470" width="240" height="60" rx="10"/>
+        <text class="ntitle" x="880" y="495">React 화면</text>
+        <text class="nsub" x="880" y="511">App.tsx · api.ts</text>
+
+        <!-- edges: triggers -> collection.py -->
+        <path class="e-up" d="M430,70 L590,150" marker-end="url(#aUp)"/>
+        <text class="elabel" x="505" y="112">cron 트리거</text>
+        <path class="e-up" d="M730,70 L660,150" marker-end="url(#aUp)"/>
+        <text class="elabel" x="700" y="112">POST /api/collect</text>
+
+        <!-- edges: write pipeline -->
+        <path class="e-up" d="M210,182.5 L270,182.5" marker-end="url(#aUp)"/>
+        <path class="e-up" d="M450,182.5 L510,182.5" marker-end="url(#aUp)"/>
+        <text class="elabel" x="240" y="235">일봉 REST(모의)</text>
+        <text class="elabel" x="240" y="248">거래일만 실전</text>
+        <text class="elabel" x="480" y="235">파싱된 캔들</text>
+        <text class="elabel" x="480" y="248">· 거래일</text>
+
+        <path class="e-neutral" d="M720,182.5 L780,182.5" marker-end="url(#aNeutral)"/>
+        <text class="elabel" x="750" y="235">완료 요약</text>
+        <text class="elabel" x="750" y="248">(성공·실패 무관)</text>
+        <path class="e-neutral" d="M950,182.5 L1000,182.5" marker-end="url(#aNeutral)"/>
+        <text class="elabel" x="975" y="235">웹훅 POST</text>
+        <text class="elabel" x="975" y="248">미설정 시 건너뜀</text>
+
+        <path class="e-up" d="M605,215 L565,330" marker-end="url(#aUp)" stroke-width="2.4"/>
+        <text class="elabel" x="595" y="268">UPSERT · ON CONFLICT</text>
+        <text class="elabel" x="595" y="281">(같은 종목·날짜 덮어씀)</text>
+
+        <!-- edges: read pipeline -->
+        <path class="e-down" d="M520,405 L560,470" marker-end="url(#aDown)"/>
+        <text class="elabel" x="505" y="440">SELECT 조회</text>
+
+        <path class="e-muted" d="M400,500 L450,500" marker-end="url(#aMuted)"/>
+        <text class="elabel" x="425" y="548">require() 검사</text>
+        <text class="elabel" x="425" y="561">401 / 403</text>
+
+        <path class="e-down" d="M670,500 L760,500" marker-end="url(#aDown)"/>
+        <text class="elabel" x="715" y="548">세션 쿠키 ↔ JSON</text>
+      </svg>
+      <figcaption>
+        <span class="swatch sw-up"></span><b>수집</b> — 스케줄러(평일 16시) 또는 admin 의 수집 버튼이 <b>collection.py</b> 를 깨우고,
+        <b>kis.py</b> 가 토큰을 캐시해 가며 KIS 에서 데이터를 받아 TimescaleDB 에 덮어씁니다.
+        <span class="swatch sw-neutral"></span>결과는 <b>discord.py</b> 로 best-effort 전송 — 웹훅이 없거나 실패해도 수집 자체는 성공으로 칩니다.
+        <span class="swatch sw-down"></span><b>조회</b> — React 는 세션 쿠키로 <b>main.py</b> 를 거쳐 같은 DB 를 읽고,
+        모든 요청은 <b>auth.py</b> 의 PERMISSIONS 표로 다시 한 번 검사됩니다.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span> 폴더 구성</h2>
+    <p class="section-note">실제 커밋된 파일 기준입니다. 배지는 역할을 가진 파일에만 붙였습니다.</p>
+
+    <div class="tree-grid">
+      <div class="tree-card">
+        <p class="tree-head">backend/app/</p>
+        <p class="tree-path">FastAPI 서버 · 수집 로직</p>
+
+        <div class="file-row"><div class="file-name">main.py</div><div class="file-desc">엔드포인트 전체. 매 요청마다 auth.require() 호출</div></div>
+        <div class="file-row"><div class="file-name">auth.py</div><div class="file-desc">비밀번호 해시 · 세션 · PERMISSIONS 표</div></div>
+        <div class="file-row"><div class="file-name">access_log.py</div><div class="file-desc">접근 로그에서 계좌번호 뒤 4자리만 남기고 가림</div></div>
+        <div class="file-row"><div class="file-name">kis.py</div><div class="file-desc">앱키 → 토큰(캐시) → 일봉 · 거래일 캘린더 조회<span class="badge">실전 예외</span></div></div>
+        <div class="file-row"><div class="file-name">trading_calendar.py</div><div class="file-desc">거래일 계산기<span class="badge">DB 없는 순수 함수</span></div></div>
+        <div class="file-row"><div class="file-name">collection.py</div><div class="file-desc">증분 수집 로직. 버튼과 스케줄러가 똑같이 호출</div></div>
+        <div class="file-row"><div class="file-name">scheduler.py</div><div class="file-desc">평일 16:00 KST 자동 수집<span class="badge">lifespan</span></div></div>
+        <div class="file-row"><div class="file-name">discord.py</div><div class="file-desc">수집 요약 전송<span class="badge">best-effort</span></div></div>
+        <div class="file-row"><div class="file-name">db.py</div><div class="file-desc">asyncpg 연결 풀</div></div>
+        <div class="file-row"><div class="file-name">schemas.py</div><div class="file-desc">요청 · 응답 pydantic 모델</div></div>
+      </div>
+
+      <div class="tree-card">
+        <p class="tree-head">frontend/src/</p>
+        <p class="tree-path">React + Vite 화면</p>
+
+        <div class="file-row"><div class="file-name">App.tsx</div><div class="file-desc">로그인 껍데기와 탭 구성</div></div>
+        <div class="file-row"><div class="file-name">Login.tsx</div><div class="file-desc">로그인 화면</div></div>
+        <div class="file-row"><div class="file-name">Profile.tsx</div><div class="file-desc">내 정보 — 아이디 · 비밀번호 변경<span class="badge">역할 변경 불가</span></div></div>
+        <div class="file-row"><div class="file-name">Market.tsx</div><div class="file-desc">시세 — 종목 고르기 · 일봉 차트 · 수집<span class="badge">수집은 admin</span></div></div>
+        <div class="file-row"><div class="file-name">Freshness.tsx</div><div class="file-desc">신선도 — 종목별 마지막 수집 상태<span class="badge">실행은 admin</span></div></div>
+        <div class="file-row"><div class="file-name">LineChart.tsx</div><div class="file-desc">선 차트. (키 · 이름 · 점들)만 받는 뷰</div></div>
+        <div class="file-row"><div class="file-name">Accounts.tsx</div><div class="file-desc">계좌<span class="badge">user는 본인만</span></div></div>
+        <div class="file-row"><div class="file-name">Users.tsx</div><div class="file-desc">사용자 · KIS 토큰 관리<span class="badge">admin 전용</span></div></div>
+        <div class="file-row"><div class="file-name">api.ts</div><div class="file-desc">fetch 래퍼. ApiError 가 서버 실패 코드를 그대로 전달</div></div>
+      </div>
+    </div>
+
+    <div class="sub-grid">
+      <div class="tree-card">
+        <p class="tree-head">db/init/</p>
+        <p class="tree-path">빈 볼륨에 처음 뜰 때만 실행</p>
+        <div class="file-row"><div class="file-name">01_schema.sql</div><div class="file-desc">stocks · daily_candles(하이퍼테이블) · trading_days · users/accounts/sessions</div></div>
+        <div class="file-row"><div class="file-name">02_seed.sql</div><div class="file-desc">종목 마스터 8개, 수업용 계정(admin/hong)</div></div>
+      </div>
+
+      <div class="tree-card">
+        <p class="tree-head">backend/tests/ · docs/</p>
+        <p class="tree-path">검증 &amp; 기록</p>
+        <div class="file-row"><div class="file-name">tests/ (7개)</div><div class="file-desc">권한 · 토큰 캐시 · 파서 · 캘린더 · 수집 · 디스코드 · 접근로그</div></div>
+        <div class="file-row"><div class="file-name">docs/schema.md</div><div class="file-desc">돌고 있는 DB 에서 읽어 적은 스키마 표</div></div>
+        <div class="file-row"><div class="file-name">secrets-checklist.md</div><div class="file-desc">비밀이 로그 · 화면 · 커밋으로 안 새는지 점검 기록</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section style="margin-bottom:0;">
+    <h2><span class="num">03</span> 잊지 말아야 할 제약</h2>
+    <p class="section-note">위 다이어그램의 특정 경로에 걸려 있는 규칙만 추렸습니다. 전체는 CLAUDE.md 참고.</p>
+    <div class="rules">
+      <div class="rule-card">
+        <p class="tag">kis.py</p>
+        <p>앱키 · 토큰은 <b>서버 밖으로 내보내지 않습니다</b>. 화면엔 발급 여부 · 만료 시각 · 가려진 앞 4자리만.</p>
+      </div>
+      <div class="rule-card b">
+        <p class="tag">KIS API 화살표</p>
+        <p>일봉은 모의 도메인, <b>거래일 캘린더만 실전 도메인</b>(모의가 이 TR을 거절). 조회만 하고 주문은 안 냅니다.</p>
+      </div>
+      <div class="rule-card c">
+        <p class="tag">discord.py</p>
+        <p>웹훅 URL 도 비밀입니다. <b>미설정 시 조용히 건너뛰고</b>, 전송 실패도 수집 실패로 치지 않습니다.</p>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

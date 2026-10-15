@@ -9,6 +9,14 @@ class Stock(BaseModel):
     market: str
 
 
+class StockIn(BaseModel):
+    """종목을 하나씩 직접 더할 때 받습니다. kospi100.csv 를 다시 고치지 않아도 되는 길입니다."""
+
+    ticker: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    name: str = Field(min_length=1, max_length=64)
+    market: str = Field(pattern=r"^(KOSPI|KOSDAQ)$")
+
+
 class Candle(BaseModel):
     """일봉 한 줄. KIS 응답도 이 모양으로 바꿔서 들고 다닙니다."""
 
@@ -57,6 +65,81 @@ class CollectResult(BaseModel):
     inserted: int
     first: datetime | None = None
     last: datetime | None = None
+
+
+# ──────────────────────────────────────────────────────────────
+# 백테스트 — 낮(장중) vs 밤(종가 배팅)
+# ──────────────────────────────────────────────────────────────
+
+
+class BacktestPoint(BaseModel):
+    time: datetime
+    cum_day: float
+    cum_night: float
+    cum_buy_hold: float
+
+
+class BacktestSummary(BaseModel):
+    final_day: float
+    final_night: float
+    final_buy_hold: float
+    win_rate_day: float
+    win_rate_night: float
+
+
+class BacktestResult(BaseModel):
+    ticker: str
+    name: str
+    points: list[BacktestPoint]
+    summary: BacktestSummary
+
+
+class UniverseImportResult(BaseModel):
+    """kospi100.csv 를 stocks 테이블에 더한 결과. 이미 있는 종목은 건드리지 않습니다."""
+
+    total: int
+    inserted: int
+
+
+class UniverseTickerSummary(BaseModel):
+    ticker: str
+    name: str
+    final_day: float
+    final_night: float
+    final_buy_hold: float
+    win_rate_day: float
+    win_rate_night: float
+    candle_count: int
+
+
+class UniverseResult(BaseModel):
+    tickers: list[UniverseTickerSummary]
+    points: list[BacktestPoint]
+
+
+class Top5Point(BaseModel):
+    time: datetime
+    cum_portfolio: float
+    cum_universe: float
+
+
+class Top5Summary(BaseModel):
+    final_portfolio: float
+    final_universe: float
+    win_rate: float
+    trading_nights: int
+
+
+class Top5Pick(BaseModel):
+    time: datetime
+    tickers: list[str]
+
+
+class Top5Result(BaseModel):
+    strategy: str
+    points: list[Top5Point]
+    summary: Top5Summary
+    picks: list[Top5Pick]
 
 
 # ──────────────────────────────────────────────────────────────

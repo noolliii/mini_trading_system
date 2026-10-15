@@ -20,19 +20,40 @@ export type CollectResult = {
 }
 export type TradingDay = { date: string; is_open: boolean }
 export type CalendarCollectResult = { year: number; fetched: number; inserted: number }
-export type CollectionStatus = {
+
+// ── 백테스트 ───────────────────────────────────────────
+export type BacktestPoint = { time: string; cum_day: number; cum_night: number; cum_buy_hold: number }
+export type BacktestSummary = {
+  final_day: number
+  final_night: number
+  final_buy_hold: number
+  win_rate_day: number
+  win_rate_night: number
+}
+export type BacktestResult = { ticker: string; name: string; points: BacktestPoint[]; summary: BacktestSummary }
+
+export type UniverseImportResult = { total: number; inserted: number }
+export type UniverseTickerSummary = {
   ticker: string
   name: string
-  last_date: string | null
-  checked_at: string
-  status: 'success' | 'partial' | 'failed'
-  message: string | null
+  final_day: number
+  final_night: number
+  final_buy_hold: number
+  win_rate_day: number
+  win_rate_night: number
+  candle_count: number
 }
-export type RunNowResult = {
-  skipped_holiday: boolean
-  success: number
-  failed: number
-  tickers: number
+export type UniverseResult = { tickers: UniverseTickerSummary[]; points: BacktestPoint[] }
+
+export type Top5Strategy = 'momentum' | 'mean_reversion' | 'volume_surge' | 'rolling_edge'
+export type Top5Point = { time: string; cum_portfolio: number; cum_universe: number }
+export type Top5Summary = { final_portfolio: number; final_universe: number; win_rate: number; trading_nights: number }
+export type Top5Pick = { time: string; tickers: string[] }
+export type Top5Result = {
+  strategy: Top5Strategy
+  points: Top5Point[]
+  summary: Top5Summary
+  picks: Top5Pick[]
 }
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }
@@ -166,6 +187,9 @@ export const issueKisToken = (mode: 'paper' | 'live', force = false) =>
 // ── 종목 · 일봉 ────────────────────────────────────────
 export const getStocks = (q?: string) =>
   request<Stock[]>(`/api/stocks${q ? `?q=${encodeURIComponent(q)}` : ''}`)
+// 종목을 하나씩 직접 더합니다 — admin 만. kospi100.csv 를 다시 고치지 않아도 됩니다
+export const createStock = (body: { ticker: string; name: string; market: string }) =>
+  request<Stock>('/api/stocks', json(body))
 export const getCandles = (ticker: string, days: number) =>
   request<CandleSeries>(`/api/candles?ticker=${ticker}&days=${days}`)
 // 수집은 admin 만. KIS 로 나가는 호출이라 서버가 다시 막습니다
@@ -183,8 +207,20 @@ export const getTradingDays = (year: number) =>
   request<TradingDay[]>(`/api/trading-days?year=${year}`)
 export const collectTradingDays = (year: number) =>
   request<CalendarCollectResult>(`/api/trading-days/collect?year=${year}`, { method: 'POST' })
-// 신선도 — 종목별로 마지막 수집이 언제·어떻게 끝났는지. 조회는 누구나
-export const getCollectionStatus = () => request<CollectionStatus[]>('/api/collection-status')
-// 스케줄러가 평일 16:00(KST) 에 돌리는 것과 같은 일을 지금 바로 합니다 — admin 만
-export const runCollectionNow = (mode: 'paper' | 'live' = 'paper') =>
-  request<RunNowResult>(`/api/collection-status/run-now?mode=${mode}`, { method: 'POST' })
+
+// ── 백테스트 — 낮(장중) vs 밤(종가 배팅) ────────────────
+export const getBacktestDayNight = (ticker: string, days: number) =>
+  request<BacktestResult>(`/api/backtest/day-night?ticker=${ticker}&days=${days}`)
+
+// 번들에 들어 있는 코스피 100 종목을 stocks 테이블에 더합니다 — admin 만
+export const importUniverse = () =>
+  request<UniverseImportResult>('/api/stocks/import-universe', { method: 'POST' })
+// tickers 를 비우면 전체 종목, 주면 그 종목들만 골라 평균을 냅니다
+export const getBacktestUniverse = (days: number, tickers?: string[]) =>
+  request<UniverseResult>(
+    `/api/backtest/universe?days=${days}` +
+      (tickers && tickers.length > 0 ? `&tickers=${tickers.join(',')}` : ''),
+  )
+
+export const getBacktestTop5 = (strategy: Top5Strategy, days: number, k: number, cost: number) =>
+  request<Top5Result>(`/api/backtest/top5?strategy=${strategy}&days=${days}&k=${k}&cost=${cost}`)

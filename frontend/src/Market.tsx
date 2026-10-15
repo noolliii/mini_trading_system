@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
+import Backtest from './Backtest'
 import LineChart, { SERIES_COLORS } from './LineChart'
 import type { ChartSeries } from './LineChart'
 import {
@@ -7,6 +8,7 @@ import {
   collectCandles,
   collectIncremental,
   collectTradingDays,
+  createStock,
   getCandles,
   getStocks,
 } from './api'
@@ -41,6 +43,10 @@ export default function Market({ me, onSessionLost }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [newTicker, setNewTicker] = useState('')
+  const [newName, setNewName] = useState('')
+  const [newMarket, setNewMarket] = useState('KOSPI')
+  const [showAnalysis, setShowAnalysis] = useState(false)
 
   const canCollect = me.permissions.includes('market:write')
 
@@ -131,6 +137,24 @@ export default function Market({ me, onSessionLost }: Props) {
     }
   }
 
+  const addStock = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setNotice(null)
+    try {
+      const s = await createStock({ ticker: newTicker, name: newName, market: newMarket })
+      setNewTicker('')
+      setNewName('')
+      setNotice(`${s.name}(${s.ticker})을 더했습니다. 유니버스 탭에서 선택할 수 있습니다.`)
+      setError(null)
+      await getStocks().then(setStocks)
+    } catch (e) {
+      handle(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const series: ChartSeries[] = useMemo(() => {
     if (!data || data.candles.length === 0) return []
     return [
@@ -151,115 +175,152 @@ export default function Market({ me, onSessionLost }: Props) {
   }, [data])
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>일봉</h2>
-        <span className="hint">
-          DB 에 적재된 일봉만 그립니다 · 수집은 {canCollect ? 'admin 인 내가' : 'admin 만'} 합니다
-        </span>
-      </div>
+    <>
+      <section className="panel">
+        <div className="panel-head">
+          <h2>일봉</h2>
+          <span className="hint">
+            DB 에 적재된 일봉만 그립니다 · 수집은 {canCollect ? 'admin 인 내가' : 'admin 만'} 합니다
+          </span>
+        </div>
 
-      <div className="filters">
-        <label className="field">
-          <span>종목</span>
-          <select value={ticker} onChange={(e) => setTicker(e.target.value)}>
-            {stocks.map((s) => (
-              <option key={s.ticker} value={s.ticker}>
-                {s.name} ({s.ticker}) · {s.market}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>기간</span>
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            {RANGES.map((r) => (
-              <option key={r.days} value={r.days}>
-                {r.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="spacer" />
+        <div className="filters">
+          <label className="field">
+            <span>종목</span>
+            <select value={ticker} onChange={(e) => setTicker(e.target.value)}>
+              {stocks.map((s) => (
+                <option key={s.ticker} value={s.ticker}>
+                  {s.name} ({s.ticker}) · {s.market}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button aria-pressed={showAnalysis} onClick={() => setShowAnalysis((v) => !v)}>
+            {showAnalysis ? '분석 닫기' : '분석'}
+          </button>
+          <label className="field">
+            <span>기간</span>
+            <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
+              {RANGES.map((r) => (
+                <option key={r.days} value={r.days}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="spacer" />
+          {canCollect && (
+            <div className="filters" style={{ marginTop: 0 }}>
+              <button className="primary" onClick={() => void collect()} disabled={busy}>
+                {busy ? 'KIS 에서 받는 중…' : '전체 수집'}
+              </button>
+              <button onClick={() => void collectIncrementally()} disabled={busy}>
+                증분 수집
+              </button>
+              <button onClick={() => void collectCalendar()} disabled={busy} title="거래일 캘린더 — 실전 도메인으로 조회만 합니다. 주문은 내지 않습니다">
+                거래일 캘린더 받기
+              </button>
+            </div>
+          )}
+        </div>
+
         {canCollect && (
-          <div className="filters" style={{ marginTop: 0 }}>
-            <button className="primary" onClick={() => void collect()} disabled={busy}>
-              {busy ? 'KIS 에서 받는 중…' : '전체 수집'}
+          <form className="inline-form" onSubmit={addStock}>
+            <label className="field">
+              <span>종목코드(6자리)</span>
+              <input
+                value={newTicker}
+                onChange={(e) => setNewTicker(e.target.value)}
+                pattern="\d{6}"
+                maxLength={6}
+                placeholder="예: 066570"
+                required
+              />
+            </label>
+            <label className="field">
+              <span>종목명</span>
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} required />
+            </label>
+            <label className="field">
+              <span>시장</span>
+              <select value={newMarket} onChange={(e) => setNewMarket(e.target.value)}>
+                <option value="KOSPI">KOSPI</option>
+                <option value="KOSDAQ">KOSDAQ</option>
+              </select>
+            </label>
+            <button type="submit" disabled={busy}>
+              종목 추가
             </button>
-            <button onClick={() => void collectIncrementally()} disabled={busy}>
-              증분 수집
-            </button>
-            <button onClick={() => void collectCalendar()} disabled={busy} title="거래일 캘린더 — 실전 도메인으로 조회만 합니다. 주문은 내지 않습니다">
-              거래일 캘린더 받기
-            </button>
+          </form>
+        )}
+
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
           </div>
         )}
-      </div>
+        {notice && <div className="banner">{notice}</div>}
 
-      {error && (
-        <div className="form-error" role="alert">
-          {error}
-        </div>
-      )}
-      {notice && <div className="banner">{notice}</div>}
+        {summary && (
+          <div className="tiles">
+            <div className="tile">
+              <div className="tile-label">
+                <span className="swatch" style={{ background: SERIES_COLORS[0] }} />
+                최근 종가
+              </div>
+              <div className="tile-value">
+                {won(summary.last.close)}
+                <span className="tile-unit">원</span>
+              </div>
+              <div className="tile-time">
+                {new Date(summary.last.time).toLocaleDateString('ko-KR')}
+              </div>
+            </div>
+            <div className="tile">
+              <div className="tile-label">기간 등락</div>
+              <div className="tile-value">
+                {summary.change >= 0 ? '+' : ''}
+                {summary.change.toFixed(2)}
+                <span className="tile-unit">%</span>
+              </div>
+              <div className="tile-time">
+                {new Date(summary.first.time).toLocaleDateString('ko-KR')} 종가 대비
+              </div>
+            </div>
+            <div className="tile">
+              <div className="tile-label">거래량</div>
+              <div className="tile-value">
+                {won(summary.last.volume)}
+                <span className="tile-unit">주</span>
+              </div>
+              <div className="tile-time">최근 거래일</div>
+            </div>
+            <div className="tile">
+              <div className="tile-label">적재된 일봉</div>
+              <div className="tile-value">
+                {data?.candles.length ?? 0}
+                <span className="tile-unit">건</span>
+              </div>
+              <div className="tile-time">최근 {days}일 구간</div>
+            </div>
+          </div>
+        )}
 
-      {summary && (
-        <div className="tiles">
-          <div className="tile">
-            <div className="tile-label">
-              <span className="swatch" style={{ background: SERIES_COLORS[0] }} />
-              최근 종가
-            </div>
-            <div className="tile-value">
-              {won(summary.last.close)}
-              <span className="tile-unit">원</span>
-            </div>
-            <div className="tile-time">
-              {new Date(summary.last.time).toLocaleDateString('ko-KR')}
-            </div>
+        {series.length === 0 ? (
+          <div className="state">
+            적재된 일봉이 없습니다.
+            {canCollect
+              ? ' 위의 「KIS 에서 일봉 수집」을 누르세요.'
+              : ' admin 이 수집해야 보입니다.'}
           </div>
-          <div className="tile">
-            <div className="tile-label">기간 등락</div>
-            <div className="tile-value">
-              {summary.change >= 0 ? '+' : ''}
-              {summary.change.toFixed(2)}
-              <span className="tile-unit">%</span>
-            </div>
-            <div className="tile-time">
-              {new Date(summary.first.time).toLocaleDateString('ko-KR')} 종가 대비
-            </div>
+        ) : (
+          <div className="chart-wrap">
+            <LineChart series={series} unit="원" />
           </div>
-          <div className="tile">
-            <div className="tile-label">거래량</div>
-            <div className="tile-value">
-              {won(summary.last.volume)}
-              <span className="tile-unit">주</span>
-            </div>
-            <div className="tile-time">최근 거래일</div>
-          </div>
-          <div className="tile">
-            <div className="tile-label">적재된 일봉</div>
-            <div className="tile-value">
-              {data?.candles.length ?? 0}
-              <span className="tile-unit">건</span>
-            </div>
-            <div className="tile-time">최근 {days}일 구간</div>
-          </div>
-        </div>
-      )}
+        )}
+      </section>
 
-      {series.length === 0 ? (
-        <div className="state">
-          적재된 일봉이 없습니다.
-          {canCollect
-            ? ' 위의 「KIS 에서 일봉 수집」을 누르세요.'
-            : ' admin 이 수집해야 보입니다.'}
-        </div>
-      ) : (
-        <div className="chart-wrap">
-          <LineChart series={series} unit="원" />
-        </div>
-      )}
-    </section>
+      {showAnalysis && <Backtest me={me} onSessionLost={onSessionLost} ticker={ticker} />}
+    </>
   )
 }
