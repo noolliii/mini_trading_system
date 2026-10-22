@@ -128,6 +128,14 @@ class Top5Summary(BaseModel):
     final_universe: float
     win_rate: float
     trading_nights: int
+    mdd: float
+    sharpe: float
+    calmar: float
+    cagr: float
+    universe_mdd: float
+    universe_sharpe: float
+    universe_calmar: float
+    universe_cagr: float
 
 
 class Top5Pick(BaseModel):
@@ -140,6 +148,16 @@ class Top5Result(BaseModel):
     points: list[Top5Point]
     summary: Top5Summary
     picks: list[Top5Pick]
+
+
+class Top5LeaderboardRow(BaseModel):
+    strategy: str
+    k: int  # 이 전략에서 샤프지수가 가장 좋았던 K — 전략마다 다를 수 있습니다
+    summary: Top5Summary
+
+
+class Top5Leaderboard(BaseModel):
+    rows: list[Top5LeaderboardRow]
 
 
 # ──────────────────────────────────────────────────────────────

@@ -30,6 +30,8 @@ from .schemas import (
     SignupIn,
     Stock,
     StockIn,
+    Top5Leaderboard,
+    Top5LeaderboardRow,
     Top5Pick,
     Top5Point,
     Top5Result,
@@ -723,16 +725,43 @@ async def run_collection_now(user: CurrentUserDep, mode: str = Query("paper", pa
 # ══════════════════════════════════════════════════════════════
 
 
-async def _fetch_candles(conn: asyncpg.Connection, ticker: str, days: int) -> list[Candle]:
+def _range_bounds(start: date | None, end: date | None) -> tuple[datetime | None, datetime | None]:
+    """start/end(날짜)를 UTC 자정 timestamptz 로 바꿉니다. 비우면 None — SQL 의
+    COALESCE 가 기존 days-기반 조회로 그대로 넘어갑니다."""
+    start_ts = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc) if start else None
+    end_ts = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc) if end else None
+    return start_ts, end_ts
+
+
+def _validate_range(start: date | None, end: date | None) -> None:
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_range",
+            "message": "시작일이 종료일보다 늦습니다",
+        })
+
+
+async def _fetch_candles(
+    conn: asyncpg.Connection,
+    ticker: str,
+    days: int,
+    start: date | None = None,
+    end: date | None = None,
+) -> list[Candle]:
+    start_ts, end_ts = _range_bounds(start, end)
     rows = await conn.fetch(
         """
         SELECT time, open, high, low, close, volume
         FROM daily_candles
-        WHERE ticker = $1 AND time > now() - make_interval(days => $2)
+        WHERE ticker = $1
+          AND time >= COALESCE($2::timestamptz, now() - make_interval(days => $3))
+          AND time <= COALESCE($4::timestamptz, now())
         ORDER BY time
         """,
         ticker,
+        start_ts,
         days,
+        end_ts,
     )
     return [Candle(**dict(r)) for r in rows]
 
@@ -742,9 +771,12 @@ async def backtest_day_night(
     user: CurrentUserDep,
     ticker: str = Query(min_length=6, max_length=6, pattern=r"^\d{6}$"),
     days: int = Query(365, ge=2, le=3650),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
 ) -> BacktestResult:
     """낮(장중) · 밤(종가 배팅) · 단순보유 누적수익률 비교. DB 에 적재된 일봉만 봅니다."""
     auth.require(user, "market:read")
+    _validate_range(start, end)
 
     async with db.acquire() as conn:
         name = await conn.fetchval("SELECT name FROM stocks WHERE ticker = $1", ticker)
@@ -753,7 +785,7 @@ async def backtest_day_night(
                 "code": "stock_not_found",
                 "message": "종목 마스터에 없는 종목코드입니다",
             })
-        candles = await _fetch_candles(conn, ticker, days)
+        candles = await _fetch_candles(conn, ticker, days, start, end)
 
     result = backtest.compute_day_night(candles)
 
@@ -800,6 +832,8 @@ async def backtest_universe(
     user: CurrentUserDep,
     days: int = Query(365, ge=2, le=3650),
     tickers: str | None = Query(None, description="콤마로 구분한 종목코드. 비우면 전체 종목"),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
 ) -> UniverseResult:
     """적재된 종목(코스피 100 포함)의 동일가중 낮 · 밤 · 단순보유 비교.
 
@@ -807,8 +841,10 @@ async def backtest_universe(
     종목 선택 체크박스가 이걸 씁니다. 비우면 지금까지처럼 전체 종목입니다.
     """
     auth.require(user, "market:read")
+    _validate_range(start, end)
 
     wanted = {t.strip() for t in tickers.split(",") if t.strip()} if tickers else None
+    start_ts, end_ts = _range_bounds(start, end)
 
     async with db.acquire() as conn:
         stock_rows = await conn.fetch("SELECT ticker, name FROM stocks ORDER BY ticker")
@@ -816,10 +852,13 @@ async def backtest_universe(
             """
             SELECT ticker, time, open, high, low, close, volume
             FROM daily_candles
-            WHERE time > now() - make_interval(days => $1)
+            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+              AND time <= COALESCE($3::timestamptz, now())
             ORDER BY ticker, time
             """,
+            start_ts,
             days,
+            end_ts,
         )
 
     names = {
@@ -844,27 +883,39 @@ async def backtest_universe(
 @app.get("/api/backtest/top5", response_model=Top5Result)
 async def backtest_top5(
     user: CurrentUserDep,
-    strategy: str = Query(pattern=r"^(momentum|mean_reversion|volume_surge|rolling_edge)$"),
+    strategy: str = Query(
+        pattern=r"^(momentum|mean_reversion|volume_surge|rolling_edge|factor_combo"
+        r"|vol_filtered_edge|vol_surge_trend|vol_surge_edge)$"
+    ),
     days: int = Query(365, ge=30, le=3650),
     k: int = Query(5, ge=1, le=20),
     cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
 ) -> Top5Result:
     """매일 유니버스에서 점수 상위 k종목을 골라 종가 배팅했을 때의 성과.
 
-    점수는 그날 자신의 데이터(모멘텀 · 역추세 · 거래량폭발) 또는 그 전까지의
-    과거 밤수익률(롤링엣지)만 씁니다 — 미래의 값을 들여다보지 않습니다.
+    점수는 그날 자신의 데이터(모멘텀 · 역추세 · 거래량폭발 · 팩터콤보) 또는
+    그 전까지의 과거 밤수익률(롤링엣지 · 팩터콤보)만 씁니다 — 미래의 값을
+    들여다보지 않습니다. 성과에는 누적수익률뿐 아니라 최대낙폭(MDD) ·
+    샤프지수 · 칼마지수도 함께 돌려줘, 수익률만으로 전략을 고르지 않게 합니다.
     """
     auth.require(user, "market:read")
+    _validate_range(start, end)
+    start_ts, end_ts = _range_bounds(start, end)
 
     async with db.acquire() as conn:
         candle_rows = await conn.fetch(
             """
             SELECT ticker, time, open, high, low, close, volume
             FROM daily_candles
-            WHERE time > now() - make_interval(days => $1)
+            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+              AND time <= COALESCE($3::timestamptz, now())
             ORDER BY ticker, time
             """,
+            start_ts,
             days,
+            end_ts,
         )
 
     by_ticker: dict[str, list[Candle]] = {}
@@ -882,3 +933,52 @@ async def backtest_top5(
         summary=Top5Summary(**vars(result.summary)),
         picks=[Top5Pick(**vars(p)) for p in result.picks],
     )
+
+
+@app.get("/api/backtest/top5-leaderboard", response_model=Top5Leaderboard)
+async def backtest_top5_leaderboard(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=30, le=3650),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
+) -> Top5Leaderboard:
+    """모든 전략을 비교하되, K(종목 수)를 하나로 고정하지 않습니다.
+
+    전략마다 1~20 종목을 다 돌려보고 샤프지수가 가장 좋은 K 하나만 골라
+    리더보드에 올립니다 — K=5 로 고정하면 어떤 전략은 불리해지는 것을 막습니다.
+    """
+    auth.require(user, "market:read")
+    _validate_range(start, end)
+    start_ts, end_ts = _range_bounds(start, end)
+
+    async with db.acquire() as conn:
+        candle_rows = await conn.fetch(
+            """
+            SELECT ticker, time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+              AND time <= COALESCE($3::timestamptz, now())
+            ORDER BY ticker, time
+            """,
+            start_ts,
+            days,
+            end_ts,
+        )
+
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+
+    rows = []
+    for strategy in selection.STRATEGIES:
+        best_k, result = selection.best_k_result(by_ticker, strategy, cost=cost)
+        rows.append(
+            Top5LeaderboardRow(
+                strategy=strategy,
+                k=best_k,
+                summary=Top5Summary(**vars(result.summary)),
+            )
+        )
+
+    return Top5Leaderboard(rows=rows)

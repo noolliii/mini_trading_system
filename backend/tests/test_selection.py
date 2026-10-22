@@ -11,11 +11,16 @@ import pytest
 
 from app.schemas import Candle
 from app.selection import (
+    _score_factor_combo,
     _score_mean_reversion,
     _score_momentum,
     _score_rolling_edge,
+    _score_vol_filtered_edge,
+    _score_vol_surge_edge,
+    _score_vol_surge_trend,
     _score_volume_surge,
     backtest_top_k,
+    best_k_result,
 )
 
 D0, D1, D2, D3 = (
@@ -74,6 +79,138 @@ def test_rolling_edge_is_none_when_returns_never_vary() -> None:
 def test_unknown_strategy_is_rejected() -> None:
     with pytest.raises(ValueError):
         backtest_top_k({}, "레버리지")
+
+
+# ──────────────────────────────────────────────────────────────
+# 팩터콤보 — 20일선 위 · 양봉 · 꽉 찬 캔들만 통과하는 명시적 필터
+# ──────────────────────────────────────────────────────────────
+
+_RISING_20 = [100.0 + i for i in range(20)]  # 20일선 위에 있도록 만드는 과거 종가
+_VARIED_NIGHTS_20 = [0.01, -0.005] * 10  # 야간샤프가 계산되도록 변동이 있는 과거 밤수익률
+
+
+def test_factor_combo_rejects_a_bearish_candle() -> None:
+    bearish = _candle(120, 121, 118, 119)  # close < open
+    score = _score_factor_combo(bearish, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_factor_combo_rejects_a_long_upper_shadow_even_if_bullish() -> None:
+    long_wick = _candle(119, 140, 118, 120)  # 양봉이지만 윗꼬리가 캔들의 30%를 훌쩍 넘음
+    score = _score_factor_combo(long_wick, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_factor_combo_rejects_a_price_below_the_20_day_average() -> None:
+    below_ma = _candle(90, 91, 89, 90)  # 20일선(평균 109.5)보다 한참 아래
+    score = _score_factor_combo(below_ma, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_factor_combo_scores_a_candidate_that_passes_every_filter() -> None:
+    clean_bull = _candle(119, 121, 118, 120.5)  # 20일선 위 · 양봉 · 윗꼬리 짧음
+    score = _score_factor_combo(clean_bull, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is not None
+    assert score > 0
+
+
+def test_backtest_top_k_accepts_factor_combo_as_a_known_strategy() -> None:
+    result = backtest_top_k({}, "factor_combo")
+    assert result.strategy == "factor_combo"
+    assert result.points == []
+
+
+# ──────────────────────────────────────────────────────────────
+# 저변동 트렌드엣지 — 20일선 위 · 저변동성만 통과하는 명시적 필터
+# ──────────────────────────────────────────────────────────────
+
+
+def test_vol_filtered_edge_rejects_a_price_below_the_20_day_average() -> None:
+    below_ma = _candle(90, 91, 89, 90)  # 20일선(평균 109.5)보다 한참 아래
+    score = _score_vol_filtered_edge(below_ma, _RISING_20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_vol_filtered_edge_rejects_high_volatility_even_in_an_uptrend() -> None:
+    clean_bull = _candle(119, 121, 118, 120.5)  # 20일선 위 · 양봉
+    choppy_nights = [0.05, -0.05] * 10  # 표준편차 5% — 2% 상한을 훌쩍 넘김
+    score = _score_vol_filtered_edge(clean_bull, _RISING_20, choppy_nights)
+    assert score is None
+
+
+def test_vol_filtered_edge_scores_a_low_volatility_uptrend_candidate() -> None:
+    clean_bull = _candle(119, 121, 118, 120.5)
+    score = _score_vol_filtered_edge(clean_bull, _RISING_20, _VARIED_NIGHTS_20)
+    assert score is not None
+    assert score > 0
+
+
+def test_backtest_top_k_accepts_vol_filtered_edge_as_a_known_strategy() -> None:
+    result = backtest_top_k({}, "vol_filtered_edge")
+    assert result.strategy == "vol_filtered_edge"
+    assert result.points == []
+
+
+# ──────────────────────────────────────────────────────────────
+# 필터드 거래량폭발 — 추세·저변동 필터를 얹은 volume_surge
+# ──────────────────────────────────────────────────────────────
+
+
+def test_vol_surge_trend_rejects_a_price_below_the_20_day_average() -> None:
+    below_ma = _candle(90, 91, 89, 90, v=3_000_000)
+    score = _score_vol_surge_trend(below_ma, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_vol_surge_trend_rejects_high_volatility_even_in_an_uptrend() -> None:
+    high_vol_bull = _candle(119, 121, 118, 120.5, v=3_000_000)
+    choppy_nights = [0.05, -0.05] * 10  # 표준편차 5% — 2% 상한을 훌쩍 넘김
+    score = _score_vol_surge_trend(high_vol_bull, _RISING_20, [1_000_000] * 20, choppy_nights)
+    assert score is None
+
+
+def test_vol_surge_trend_scores_a_low_volatility_uptrend_candidate() -> None:
+    high_vol_bull = _candle(119, 121, 118, 120.5, v=3_000_000)
+    score = _score_vol_surge_trend(high_vol_bull, _RISING_20, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score == pytest.approx(3.0)  # volume_surge 점수(3.0) 그대로 통과
+
+
+def test_backtest_top_k_accepts_vol_surge_trend_as_a_known_strategy() -> None:
+    result = backtest_top_k({}, "vol_surge_trend")
+    assert result.strategy == "vol_surge_trend"
+    assert result.points == []
+
+
+# ──────────────────────────────────────────────────────────────
+# 거래량폭발×야간샤프 — 필터 없이 두 점수를 곱셈으로만 결합
+# ──────────────────────────────────────────────────────────────
+
+
+def test_vol_surge_edge_rejects_a_bearish_candle() -> None:
+    bearish = _candle(120, 121, 118, 119, v=3_000_000)  # close < open
+    score = _score_vol_surge_edge(bearish, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    assert score is None
+
+
+def test_vol_surge_edge_rejects_when_night_edge_is_non_positive() -> None:
+    bullish = _candle(100, 105, 99, 104, v=3_000_000)
+    flat_nights = [0.01] * 20  # 변동이 없어 rolling_edge 가 None
+    score = _score_vol_surge_edge(bullish, [1_000_000] * 20, flat_nights)
+    assert score is None
+
+
+def test_vol_surge_edge_multiplies_volume_surge_and_rolling_edge() -> None:
+    bullish = _candle(100, 105, 99, 104, v=3_000_000)
+    score = _score_vol_surge_edge(bullish, [1_000_000] * 20, _VARIED_NIGHTS_20)
+    surge = _score_volume_surge(bullish, [1_000_000] * 20)
+    edge = _score_rolling_edge(_VARIED_NIGHTS_20)
+    assert score == pytest.approx(surge * edge)
+
+
+def test_backtest_top_k_accepts_vol_surge_edge_as_a_known_strategy() -> None:
+    result = backtest_top_k({}, "vol_surge_edge")
+    assert result.strategy == "vol_surge_edge"
+    assert result.points == []
 
 
 # ──────────────────────────────────────────────────────────────
@@ -146,3 +283,61 @@ def test_future_candles_never_change_an_earlier_pick() -> None:
     # 마지막 전환(D2→D3)은 D3 의 시가가 바뀌어 실현수익이 달라질 수 있습니다 —
     # 즉 "바뀔 수 있는 자리만 바뀐다"를 함께 확인합니다
     assert result_base.points[2] != result_mutated.points[2]
+
+
+def test_summary_carries_mdd_sharpe_calmar() -> None:
+    """Week 7: 수익률뿐 아니라 위험조정 지표도 함께 돌려줍니다."""
+    result = backtest_top_k(UNIVERSE_2DAY, "mean_reversion", k=1, cost=0.0)
+    assert result.summary.mdd <= 0.0
+    assert result.summary.calmar == pytest.approx(
+        result.summary.final_portfolio / abs(result.summary.mdd)
+        if result.summary.mdd
+        else 0.0
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# best_k_result — 전략마다 샤프지수가 가장 좋은 K 를 직접 찾아줍니다
+# ──────────────────────────────────────────────────────────────
+
+# A: 매일 모멘텀 점수가 B보다 높아 k=1일 땐 항상 A 혼자만 담깁니다 — 밤수익률이
+# 완만하고 꾸준해(1.0%·1.5%·1.2%) 변동성이 작습니다.
+# B: 모멘텀 점수는 항상 A보다 낮지만, 밤수익률이 크게 출렁입니다(5%·-4%·6%) —
+# k=2(둘 다 담김)가 되면 그 변동성이 그대로 포트폴리오에 섞여 들어갑니다.
+_BEST_K_UNIVERSE = {
+    "A": [
+        Candle(time=D0, open=100, high=110, low=99, close=109, volume=1),
+        Candle(time=D1, open=110.09, high=112, low=109, close=111, volume=1),
+        Candle(time=D2, open=112.665, high=115, low=112, close=114, volume=1),
+        Candle(time=D3, open=115.368, high=117, low=115, close=116, volume=1),
+    ],
+    "B": [
+        Candle(time=D0, open=100, high=108, low=99, close=100.5, volume=1),
+        Candle(time=D1, open=105.525, high=115, low=100, close=106, volume=1),
+        Candle(time=D2, open=101.76, high=112, low=98, close=102, volume=1),
+        Candle(time=D3, open=108.12, high=120, low=100, close=109, volume=1),
+    ],
+}
+
+
+def test_best_k_result_picks_the_k_with_the_highest_sharpe() -> None:
+    k_candidates = (1, 2)
+    best_k, best_result = best_k_result(_BEST_K_UNIVERSE, "momentum", cost=0.0, k_candidates=k_candidates)
+
+    manual = {k: backtest_top_k(_BEST_K_UNIVERSE, "momentum", k=k, cost=0.0) for k in k_candidates}
+    expected_k = max(manual, key=lambda kk: manual[kk].summary.sharpe)
+
+    assert best_k == expected_k == 1  # 변동성이 작은 A 혼자인 k=1 이 더 좋은 샤프를 냅니다
+    assert best_result.summary.sharpe == pytest.approx(manual[expected_k].summary.sharpe)
+    assert best_result.picks == manual[expected_k].picks
+
+
+def test_universe_metrics_are_the_same_across_strategies_for_the_same_period() -> None:
+    """유니버스(벤치마크) 지표는 포트폴리오 전략 선택과 무관합니다 — 화면 리더보드가
+    아무 전략 응답에서나 벤치마크 행을 그대로 가져다 써도 되는 이유입니다.
+    """
+    a = backtest_top_k(UNIVERSE_2DAY, "momentum", k=1, cost=0.0)
+    b = backtest_top_k(UNIVERSE_2DAY, "mean_reversion", k=1, cost=0.0)
+    assert a.summary.universe_mdd == pytest.approx(b.summary.universe_mdd)
+    assert a.summary.universe_sharpe == pytest.approx(b.summary.universe_sharpe)
+    assert a.summary.universe_calmar == pytest.approx(b.summary.universe_calmar)

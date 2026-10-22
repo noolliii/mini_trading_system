@@ -45,9 +45,31 @@ export type UniverseTickerSummary = {
 }
 export type UniverseResult = { tickers: UniverseTickerSummary[]; points: BacktestPoint[] }
 
-export type Top5Strategy = 'momentum' | 'mean_reversion' | 'volume_surge' | 'rolling_edge'
+export type Top5Strategy =
+  | 'momentum'
+  | 'mean_reversion'
+  | 'volume_surge'
+  | 'rolling_edge'
+  | 'factor_combo'
+  | 'vol_filtered_edge'
+  | 'vol_surge_trend'
+  | 'vol_surge_edge'
 export type Top5Point = { time: string; cum_portfolio: number; cum_universe: number }
-export type Top5Summary = { final_portfolio: number; final_universe: number; win_rate: number; trading_nights: number }
+export type Top5Summary = {
+  final_portfolio: number
+  final_universe: number
+  win_rate: number
+  trading_nights: number
+  mdd: number
+  sharpe: number
+  calmar: number
+  cagr: number
+  // 유니버스(동일가중 전체 종목) 벤치마크 쪽 지표 — 전략과 무관하게 같은 기간이면 항상 같습니다
+  universe_mdd: number
+  universe_sharpe: number
+  universe_calmar: number
+  universe_cagr: number
+}
 export type Top5Pick = { time: string; tickers: string[] }
 export type Top5Result = {
   strategy: Top5Strategy
@@ -55,6 +77,8 @@ export type Top5Result = {
   summary: Top5Summary
   picks: Top5Pick[]
 }
+export type Top5LeaderboardRow = { strategy: Top5Strategy; k: number; summary: Top5Summary }
+export type Top5Leaderboard = { rows: Top5LeaderboardRow[] }
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
@@ -222,5 +246,27 @@ export const getBacktestUniverse = (days: number, tickers?: string[]) =>
       (tickers && tickers.length > 0 ? `&tickers=${tickers.join(',')}` : ''),
   )
 
-export const getBacktestTop5 = (strategy: Top5Strategy, days: number, k: number, cost: number) =>
-  request<Top5Result>(`/api/backtest/top5?strategy=${strategy}&days=${days}&k=${k}&cost=${cost}`)
+// start/end 를 주면 days 대신 그 기간으로 조회합니다(기간 지정 기능)
+export const getBacktestTop5 = (
+  strategy: Top5Strategy,
+  days: number,
+  k: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<Top5Result>(
+    `/api/backtest/top5?strategy=${strategy}&days=${days}&k=${k}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+  )
+
+export const getBacktestTop5Leaderboard = (
+  days: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<Top5Leaderboard>(
+    `/api/backtest/top5-leaderboard?days=${days}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+  )
