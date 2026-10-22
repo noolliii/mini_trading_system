@@ -49,6 +49,10 @@ CHART_PAGE_DAYS = 130
 # 모의는 1초에 2건까지입니다. 끊어 부르는 사이에 숨을 돌립니다
 RATE_SLEEP_SECONDS = 0.4
 
+# 일봉 조회가 가끔 일시적으로 500 을 내는 경우가 있어, 그때만 짧게 쉬었다가
+# 다시 시도합니다. 마지막 항목은 None — "더 안 쉬고 이번이 마지막 시도"라는 뜻입니다.
+_CHART_RETRY_BACKOFF: tuple[float | None, ...] = (0.5, 1.0, None)
+
 KST = timezone(timedelta(hours=9))
 
 # 국내휴장일조회. 계좌와 무관한 시장 전체의 공개 정보인데도, 모의(paper) 도메인은
@@ -410,30 +414,41 @@ async def _chart_page(
     start: date,
     end: date,
 ) -> list[dict[str, str]]:
-    """날짜 구간 하나(최대 100건)를 받아 output2 를 그대로 돌려줍니다."""
+    """날짜 구간 하나(최대 100건)를 받아 output2 를 그대로 돌려줍니다.
+
+    KIS 가 일시적으로 500 을 낼 때만(_CHART_RETRY_BACKOFF) 짧게 쉬었다가 다시
+    시도합니다 — 앱키 오류 같은 400계는 다시 불러도 똑같이 실패하므로 그대로
+    즉시 실패합니다.
+    """
     app_key, app_secret = credentials(mode)
 
-    res = await _guarded(
-        client.get(
-            f"{HOSTS[mode]}{CHART_PATH}",
-            headers={
-                "content-type": "application/json; charset=utf-8",
-                "authorization": f"Bearer {token}",
-                "appkey": app_key,
-                "appsecret": app_secret,
-                "tr_id": CHART_TR_ID,
-                "custtype": "P",
-            },
-            params={
-                "FID_COND_MRKT_DIV_CODE": "J",  # 주식
-                "FID_INPUT_ISCD": ticker,
-                "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
-                "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
-                "FID_PERIOD_DIV_CODE": "D",  # 일봉
-                "FID_ORG_ADJ_PRC": "0",  # 수정주가
-            },
+    for backoff in _CHART_RETRY_BACKOFF:
+        res = await _guarded(
+            client.get(
+                f"{HOSTS[mode]}{CHART_PATH}",
+                headers={
+                    "content-type": "application/json; charset=utf-8",
+                    "authorization": f"Bearer {token}",
+                    "appkey": app_key,
+                    "appsecret": app_secret,
+                    "tr_id": CHART_TR_ID,
+                    "custtype": "P",
+                },
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",  # 주식
+                    "FID_INPUT_ISCD": ticker,
+                    "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+                    "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
+                    "FID_PERIOD_DIV_CODE": "D",  # 일봉
+                    "FID_ORG_ADJ_PRC": "0",  # 수정주가
+                },
+            )
         )
-    )
+
+        if res.status_code < 500 or backoff is None:
+            break
+        log.warning("일봉 조회 %s 500 — %.1f초 뒤 재시도", ticker, backoff)
+        await asyncio.sleep(backoff)
 
     if res.status_code != 200:
         # 본문에 보낸 헤더가 되돌아오는 경우가 있어 본문을 싣지 않습니다
