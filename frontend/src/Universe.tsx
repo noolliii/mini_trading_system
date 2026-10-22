@@ -13,6 +13,8 @@ type Props = {
 const RANGES = [
   { days: 90, label: '3개월' },
   { days: 365, label: '1년' },
+  { days: 1095, label: '3년' },
+  { days: 1825, label: '5년' },
 ]
 
 function pct(v: number): string {
