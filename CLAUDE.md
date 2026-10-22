@@ -38,6 +38,14 @@ backend/app/
   discord.py   수집 끝나면 요약 전송. DISCORD_WEBHOOK_URL 없으면 조용히 건너뜀
   db.py        asyncpg 연결 풀
   schemas.py   요청 · 응답 모델 (pydantic)
+  backtest.py  낮(장중) vs 밤(종가 배팅) vs 단순보유 누적수익률 (DB 없는 순수 함수)
+  universe.py  유니버스 동일가중 낮 · 밤 · 단순보유 비교 (DB 없는 순수 함수)
+  selection.py 매일 Top-K 종목을 골라 종가 배팅 — momentum · mean_reversion ·
+               volume_surge · rolling_edge · factor_combo · vol_filtered_edge ·
+               vol_surge_trend · vol_surge_edge 8대 전략. best_k_result 가 전략마다
+               샤프지수가 가장 좋은 K(1~20)를 직접 찾아 리더보드에 씁니다
+  factors.py   OHLCV 파생 팩터 컬럼(캔들모양 · 수급 · 추세 · 야간관성) — factor_combo 가 씀
+  metrics.py   최대낙폭(MDD) · 샤프지수 · 칼마지수 (DB 없는 순수 함수)
 frontend/src/
   App.tsx      로그인 껍데기와 탭
   Login.tsx    로그인 화면
@@ -47,6 +55,10 @@ frontend/src/
   LineChart.tsx 선 차트. (키 · 이름 · 점들) 만 받습니다
   Accounts.tsx 계좌 (user 는 본인 것만)
   Users.tsx    사용자 · KIS 토큰 (admin 전용)
+  Universe.tsx 유니버스 — 종목 선택 체크박스 · 낮/밤/단순보유 리더보드
+  Top5.tsx     Top-K 전략 — 전략 선택 · 기간(기간선택 또는 시작~종료일) ·
+               MDD·샤프·칼마·CAGR 타일 · 최근 선택 종목 · 전략 비교 리더보드(종목
+               수는 전략마다 서버가 찾은 최적 K)
   api.ts       fetch 래퍼. ApiError 가 서버의 실패 코드를 그대로 들고 옵니다
 db/init/
   01_schema.sql  stocks · daily_candles(하이퍼테이블) · trading_days ·
@@ -60,6 +72,11 @@ backend/tests/
   test_collection.py   증분 수집 일괄 실행 — 한 종목 실패가 나머지를 안 멈추는지
   test_discord.py      웹훅 미설정 시 건너뛰기 · 주소가 로그에 안 남는지
   test_access_log.py   계좌번호가 로그에 남지 않는지
+  test_backtest.py     낮/밤/단순보유 항등식 확인
+  test_universe.py     종목별 거래일이 어긋나도 그날 값 있는 종목끼리만 평균
+  test_selection.py    미래참조 편향 없음 · 8대 전략 필터 · 비용 차감 · best_k_result
+  test_metrics.py      MDD 는 고점 기준, 샤프는 변동 없으면 0, 칼마 = 수익/|MDD|
+  test_factors.py      파생 팩터 컬럼의 20일 역사 조건
   fixtures/daily_response.json  실제로 받은 일봉 응답 한 건
   fixtures/holiday_response.json  실제로 받은 휴장일 응답 (한글날 포함)
 docs/
