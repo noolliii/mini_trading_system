@@ -80,6 +80,16 @@ export type Top5Result = {
 export type Top5LeaderboardRow = { strategy: Top5Strategy; k: number; summary: Top5Summary }
 export type Top5Leaderboard = { rows: Top5LeaderboardRow[] }
 
+// ── 머신러닝(ML) — Week 8: 전 구간 학습, 분할 없음 ───────
+export type MlFeatureImportance = { name: string; importance: number }
+export type MlResult = {
+  k: number
+  trained_at: string
+  rows: number
+  feature_importances: MlFeatureImportance[]
+  result: { strategy: string; points: Top5Point[]; summary: Top5Summary; picks: Top5Pick[] }
+}
+
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
 export type User = {
@@ -269,4 +279,29 @@ export const getBacktestTop5Leaderboard = (
     `/api/backtest/top5-leaderboard?days=${days}&cost=${cost}` +
       (range?.start ? `&start=${range.start}` : '') +
       (range?.end ? `&end=${range.end}` : ''),
+  )
+
+// 저장된 모델을 재학습 없이 불러와 주어진 기간에 대해서만 다시 점수를 매깁니다
+export const getLatestMlResult = (
+  days: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<MlResult>(
+    `/api/backtest/ml/latest?days=${days}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+  )
+
+// 구간 분할 없이 전 구간으로 다시 학습하고 모델을 저장합니다 — admin 만
+export const trainMlModel = (
+  days: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<MlResult>(
+    `/api/backtest/ml/train?days=${days}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+    { method: 'POST' },
   )

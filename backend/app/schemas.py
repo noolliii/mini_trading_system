@@ -161,6 +161,28 @@ class Top5Leaderboard(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
+# 머신러닝(ML) — Week 8: 전 구간 학습, 분할 없음
+# ──────────────────────────────────────────────────────────────
+
+
+class FeatureImportance(BaseModel):
+    name: str
+    importance: float
+
+
+class MlResult(BaseModel):
+    """머신러닝(RandomForest) 전 구간 학습 결과. 비ML 8대 전략과 같은 Top5Result 형식이라
+    같은 화면·같은 잣대(샤프·MDD·칼마·CAGR)로 바로 비교할 수 있습니다.
+    """
+
+    k: int  # 샤프지수가 가장 좋았던 K(1~20) — 8대 전략과 동일하게 탐색
+    trained_at: datetime
+    rows: int  # 학습에 쓰인 (종목, 날짜) 표본 수
+    feature_importances: list[FeatureImportance]
+    result: Top5Result
+
+
+# ──────────────────────────────────────────────────────────────
 # 로그인 · 권한
 # ──────────────────────────────────────────────────────────────
 

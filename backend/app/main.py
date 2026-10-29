@@ -10,7 +10,7 @@ import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import access_log, auth, backtest, collection, db, kis, scheduler, selection, universe
+from . import access_log, auth, backtest, collection, db, kis, ml_selection, scheduler, selection, universe
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
@@ -23,10 +23,12 @@ from .schemas import (
     CandleSeries,
     CollectionStatus,
     CollectResult,
+    FeatureImportance,
     LoginIn,
     LoginOut,
     Me,
     MeUpdate,
+    MlResult,
     SignupIn,
     Stock,
     StockIn,
@@ -982,3 +984,100 @@ async def backtest_top5_leaderboard(
         )
 
     return Top5Leaderboard(rows=rows)
+
+
+def _to_ml_result(ml_result: ml_selection.MlResult) -> MlResult:
+    return MlResult(
+        k=ml_result.k,
+        trained_at=ml_result.trained_at,
+        rows=ml_result.rows,
+        feature_importances=[FeatureImportance(**vars(f)) for f in ml_result.feature_importances],
+        result=Top5Result(
+            strategy=ml_result.result.strategy,
+            points=[Top5Point(**vars(p)) for p in ml_result.result.points],
+            summary=Top5Summary(**vars(ml_result.result.summary)),
+            picks=[Top5Pick(**vars(p)) for p in ml_result.result.picks],
+        ),
+    )
+
+
+@app.post("/api/backtest/ml/train", response_model=MlResult)
+async def backtest_ml_train(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=30, le=3650),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="학습 시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="학습 종료일. 비우면 지금까지"),
+) -> MlResult:
+    """구간을 나누지 않고 받은 기간 전체로 랜덤포레스트를 학습해 모델을 저장합니다(admin 전용).
+
+    선택은 8대 비머신러닝 전략과 똑같은 경로(selection.best_k_from_scores)를 타서
+    비용차감·샤프·MDD·칼마·CAGR 계산 방식이 완전히 같습니다 — 비교가 공정합니다.
+    """
+    auth.require(user, "market:write")
+    _validate_range(start, end)
+    start_ts, end_ts = _range_bounds(start, end)
+
+    async with db.acquire() as conn:
+        candle_rows = await conn.fetch(
+            """
+            SELECT ticker, time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+              AND time <= COALESCE($3::timestamptz, now())
+            ORDER BY ticker, time
+            """,
+            start_ts,
+            days,
+            end_ts,
+        )
+
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+
+    try:
+        result = ml_selection.train_and_save(by_ticker, cost=cost)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "insufficient_data", "message": str(e)})
+
+    return _to_ml_result(result)
+
+
+@app.get("/api/backtest/ml/latest", response_model=MlResult)
+async def backtest_ml_latest(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=30, le=3650),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
+) -> MlResult:
+    """저장된 모델을 재학습 없이 불러와, 주어진 기간에 대해서만 다시 점수를 매깁니다."""
+    auth.require(user, "market:read")
+    _validate_range(start, end)
+    start_ts, end_ts = _range_bounds(start, end)
+
+    async with db.acquire() as conn:
+        candle_rows = await conn.fetch(
+            """
+            SELECT ticker, time, open, high, low, close, volume
+            FROM daily_candles
+            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+              AND time <= COALESCE($3::timestamptz, now())
+            ORDER BY ticker, time
+            """,
+            start_ts,
+            days,
+            end_ts,
+        )
+
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+
+    try:
+        result = ml_selection.load_and_score(by_ticker, cost=cost)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail={"code": "model_not_trained", "message": str(e)})
+
+    return _to_ml_result(result)

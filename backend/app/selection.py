@@ -405,32 +405,49 @@ def backtest_top_k(
     return _aggregate_top_k(strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, k, cost)
 
 
+def best_k_from_scores(
+    strategy_name: str,
+    all_dates: list[datetime],
+    sorted_candidates: list[list[tuple[str, float]]],
+    realized_per_day: list[dict[str, float]],
+    universe_returns: list[float],
+    cost: float = 0.0,
+    k_candidates: tuple[int, ...] = K_CANDIDATES,
+) -> tuple[int, Top5Result]:
+    """이미 날짜별로 정렬해 둔 후보 리스트에서 K_CANDIDATES 를 전부 돌려보고
+    샤프지수가 가장 좋은 K 하나와 그 결과를 돌려줍니다.
+
+    종목 수(K)를 하나로 고정하면 전략마다 유불리가 갈립니다 — 리더보드가
+    전략끼리 공정하게 비교하려면, 각 전략에게 가장 유리한 K 를 찾아줘야 합니다.
+    과거-점수 계산은 K 와 무관해 호출부에서 한 번만 하고, 여기서는 그걸 잘라
+    모으는 가벼운 집계(_aggregate_top_k)만 K 개수만큼 반복합니다.
+
+    점수를 "사람이 정한 수식"(8대 전략)이 아니라 "학습된 모델의 예측"으로
+    매겨도 이 뒤의 집계·비용차감·샤프 계산은 똑같아야 비ML·ML 비교가 공정하므로,
+    ml_selection.py 도 이 함수를 그대로 재사용합니다.
+    """
+    best_k = k_candidates[0]
+    best_result = _aggregate_top_k(
+        strategy_name, all_dates, sorted_candidates, realized_per_day, universe_returns, best_k, cost
+    )
+    for k in k_candidates[1:]:
+        result = _aggregate_top_k(
+            strategy_name, all_dates, sorted_candidates, realized_per_day, universe_returns, k, cost
+        )
+        if result.summary.sharpe > best_result.summary.sharpe:
+            best_k, best_result = k, result
+    return best_k, best_result
+
+
 def best_k_result(
     universe: dict[str, list[Candle]],
     strategy: str,
     cost: float = 0.0,
     k_candidates: tuple[int, ...] = K_CANDIDATES,
 ) -> tuple[int, Top5Result]:
-    """K_CANDIDATES 를 전부 돌려보고 샤프지수가 가장 좋은 K 하나와 그 결과를 돌려줍니다.
-
-    종목 수(K)를 하나로 고정하면 전략마다 유불리가 갈립니다 — 리더보드가
-    전략끼리 공정하게 비교하려면, 각 전략에게 가장 유리한 K 를 찾아줘야 합니다.
-    과거-점수 계산(_score_all_days)은 K 와 무관해 한 번만 하고, K 개수만큼
-    반복하는 건 그걸 잘라 모으는 가벼운 집계(_aggregate_top_k)뿐입니다.
-    """
+    """K_CANDIDATES 를 전부 돌려보고 샤프지수가 가장 좋은 K 하나와 그 결과를 돌려줍니다."""
     if strategy not in STRATEGIES:
         raise ValueError(f"알 수 없는 전략입니다: {strategy}")
 
     all_dates, sorted_candidates, realized_per_day, universe_returns = _score_all_days(universe, strategy)
-
-    best_k = k_candidates[0]
-    best_result = _aggregate_top_k(
-        strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, best_k, cost
-    )
-    for k in k_candidates[1:]:
-        result = _aggregate_top_k(
-            strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, k, cost
-        )
-        if result.summary.sharpe > best_result.summary.sharpe:
-            best_k, best_result = k, result
-    return best_k, best_result
+    return best_k_from_scores(strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, cost, k_candidates)

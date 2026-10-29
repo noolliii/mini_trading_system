@@ -2,8 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import LineChart, { SERIES_COLORS } from './LineChart'
 import type { ChartSeries } from './LineChart'
-import { ApiError, getBacktestTop5, getBacktestTop5Leaderboard, getStocks } from './api'
-import type { Me, Stock, Top5Result, Top5Strategy, Top5Summary } from './api'
+import {
+  ApiError,
+  getBacktestTop5,
+  getBacktestTop5Leaderboard,
+  getLatestMlResult,
+  getStocks,
+  trainMlModel,
+} from './api'
+import type { Me, MlResult, Stock, Top5Result, Top5Strategy, Top5Summary } from './api'
 
 type Props = {
   me: Me
@@ -69,6 +76,10 @@ export default function Top5({ me, onSessionLost }: Props) {
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[] | null>(null)
   const [stocks, setStocks] = useState<Stock[]>([])
   const [error, setError] = useState<string | null>(null)
+  // Week 8: 비머신러닝(위 8대 전략) vs 머신러닝(RandomForest, 전 구간 학습) 비교
+  const [mlResult, setMlResult] = useState<MlResult | null>(null)
+  const [mlStatus, setMlStatus] = useState<string | null>(null)
+  const [mlTraining, setMlTraining] = useState(false)
 
   const handle = useCallback(
     (e: unknown) => {
@@ -130,8 +141,56 @@ export default function Top5({ me, onSessionLost }: Props) {
     void loadLeaderboard()
   }, [loadLeaderboard])
 
+  // 같은 기간 · 비용으로 저장된 머신러닝 모델을 재학습 없이 불러와 다시 채점만 합니다
+  const loadMl = useCallback(async () => {
+    try {
+      setMlResult(
+        await getLatestMlResult(days, costPct / 100, {
+          start: startDate || undefined,
+          end: endDate || undefined,
+        }),
+      )
+      setMlStatus(null)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'model_not_trained') {
+        setMlResult(null)
+        setMlStatus('아직 학습된 머신러닝 모델이 없습니다. admin 이 먼저 학습을 실행해야 합니다.')
+        return
+      }
+      handle(e)
+    }
+  }, [days, costPct, startDate, endDate, handle])
+
+  useEffect(() => {
+    void loadMl()
+  }, [loadMl])
+
+  // 규칙 2: 구간 분할 없이 지금 선택한 기간 전체로 다시 학습합니다 (admin 전용)
+  const handleTrainMl = useCallback(async () => {
+    setMlTraining(true)
+    try {
+      setMlResult(
+        await trainMlModel(days, costPct / 100, {
+          start: startDate || undefined,
+          end: endDate || undefined,
+        }),
+      )
+      setMlStatus(null)
+    } catch (e) {
+      handle(e)
+    } finally {
+      setMlTraining(false)
+    }
+  }, [days, costPct, startDate, endDate, handle])
+
   const rankedLeaderboard = useMemo(
     () => (leaderboard ? [...leaderboard].sort((a, b) => b.summary.calmar - a.summary.calmar) : []),
+    [leaderboard],
+  )
+  const bestNonMlBySharpe = useMemo(
+    () => (leaderboard && leaderboard.length > 0
+      ? [...leaderboard].sort((a, b) => b.summary.sharpe - a.summary.sharpe)[0]
+      : null),
     [leaderboard],
   )
   const benchmark = leaderboard?.[0]?.summary
@@ -354,6 +413,68 @@ export default function Top5({ me, onSessionLost }: Props) {
                 ))}
               </tbody>
             </table>
+          </div>
+        </>
+      )}
+
+      <div className="panel-head" style={{ marginTop: 28 }}>
+        <h3 style={{ margin: 0 }}>Week 8 — 비머신러닝 최고 vs 머신러닝</h3>
+        <span className="hint">
+          같은 기간 · 비용(위 필터)으로 비교 · 머신러닝은 RandomForest 를 구간 분할 없이 전 구간 학습
+        </span>
+      </div>
+
+      {me.role === 'admin' && (
+        <button className="primary" onClick={() => void handleTrainMl()} disabled={mlTraining} style={{ marginBottom: 12 }}>
+          {mlTraining ? '학습 중…' : '머신러닝 모델 재학습 (전 구간, 분할 없음)'}
+        </button>
+      )}
+
+      {mlStatus && <div className="hint">{mlStatus}</div>}
+
+      {bestNonMlBySharpe && mlResult && (
+        <>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>방식</th>
+                  <th>종목 선택 기준</th>
+                  <th>종목 수</th>
+                  <th>누적수익률</th>
+                  <th>CAGR</th>
+                  <th>MDD</th>
+                  <th>샤프 🏆</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{bestNonMlBySharpe.label} (비ML 최고)</td>
+                  <td>{bestNonMlBySharpe.hint}</td>
+                  <td>{bestNonMlBySharpe.k}</td>
+                  <td className="mono">{pct(bestNonMlBySharpe.summary.final_portfolio)}</td>
+                  <td className="mono">{pct(bestNonMlBySharpe.summary.cagr)}</td>
+                  <td className="mono">{pct(bestNonMlBySharpe.summary.mdd)}</td>
+                  <td className="mono">{bestNonMlBySharpe.summary.sharpe.toFixed(2)}</td>
+                </tr>
+                <tr>
+                  <td>머신러닝 (RandomForest)</td>
+                  <td>예측한 다음날 밤수익률 순위</td>
+                  <td>{mlResult.k}</td>
+                  <td className="mono">{pct(mlResult.result.summary.final_portfolio)}</td>
+                  <td className="mono">{pct(mlResult.result.summary.cagr)}</td>
+                  <td className="mono">{pct(mlResult.result.summary.mdd)}</td>
+                  <td className="mono">{mlResult.result.summary.sharpe.toFixed(2)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="hint" style={{ marginTop: 8 }}>
+            학습 {new Date(mlResult.trained_at).toLocaleString('ko-KR')} · 표본 {mlResult.rows.toLocaleString()}개 ·
+            특성중요도{' '}
+            {mlResult.feature_importances
+              .map((f) => `${f.name} ${(f.importance * 100).toFixed(1)}%`)
+              .join(' · ')}
           </div>
         </>
       )}
