@@ -36,6 +36,9 @@ services:
       KIS_PAPER_APP_SECRET: ${KIS_PAPER_APP_SECRET:-}
       KIS_LIVE_APP_KEY: ${KIS_LIVE_APP_KEY:-}
       KIS_LIVE_APP_SECRET: ${KIS_LIVE_APP_SECRET:-}
+      # KRX 로그인(pykrx 용). 값은 .env 에서 넘어오고 코드에는 적지 않습니다
+      KRX_ID: ${KRX_ID:-}
+      KRX_PW: ${KRX_PW:-}
       # Windows 바인드 마운트에서는 inotify가 안 올라와서 폴링이 필요합니다
       WATCHFILES_FORCE_POLLING: "true"
     ports:
