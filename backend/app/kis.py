@@ -53,6 +53,11 @@ RATE_SLEEP_SECONDS = 0.4
 # 다시 시도합니다. 마지막 항목은 None — "더 안 쉬고 이번이 마지막 시도"라는 뜻입니다.
 _CHART_RETRY_BACKOFF: tuple[float | None, ...] = (0.5, 1.0, None)
 
+# 빈 페이지(200 OK, output2 없음)를 바로 "상장 전 구간"으로 단정하면, 일시적인
+# 네트워크 불안정으로 한 페이지만 비어 와도 그 뒤 과거 이력을 통째로 놓칩니다
+# (실제로 겪은 버그 — 오래된 종목이 최근 날짜부터만 수집됨). 한 번 더 확인합니다.
+_EMPTY_PAGE_RETRY_SECONDS = 1.0
+
 KST = timezone(timedelta(hours=9))
 
 # 국내휴장일조회. 계좌와 무관한 시장 전체의 공개 정보인데도, 모의(paper) 도메인은
@@ -486,8 +491,14 @@ async def fetch_daily_candles(
             )
 
             if not candles:
-                # 더 거슬러 올라가도 없다고 보고 멈춥니다 (상장 전 구간)
-                break
+                # 상장 전 구간인지, 일시적으로 비어 온 것뿐인지 한 번 더 확인합니다
+                await asyncio.sleep(_EMPTY_PAGE_RETRY_SECONDS)
+                candles = parse_chart_rows(
+                    await _chart_page(client, mode, token, ticker, page_start, cursor)
+                )
+                if not candles:
+                    # 두 번 다 비었으면 그제서야 상장 전 구간으로 보고 멈춥니다
+                    break
 
             for candle in candles:
                 collected[candle.time] = candle

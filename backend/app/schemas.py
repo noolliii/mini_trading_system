@@ -101,6 +101,18 @@ class UniverseImportResult(BaseModel):
     inserted: int
 
 
+class IndexMembersImportResult(BaseModel):
+    """kospi100_history.csv 를 index_members 테이블에 반영한 결과.
+
+    같은 종목 · 같은 편입일은 덮어쓰므로(ON CONFLICT), 다시 실행해도 줄이
+    늘지 않습니다 — rows 는 파일의 구간 수, upserted 는 실제 반영된 구간 수입니다.
+    """
+
+    rows: int
+    upserted: int
+    new_stocks: int
+
+
 class UniverseTickerSummary(BaseModel):
     ticker: str
     name: str
@@ -171,15 +183,40 @@ class FeatureImportance(BaseModel):
 
 
 class MlResult(BaseModel):
-    """머신러닝(RandomForest) 전 구간 학습 결과. 비ML 8대 전략과 같은 Top5Result 형식이라
+    """머신러닝 모델 하나의 전 구간 학습 결과. 비ML 8대 전략과 같은 Top5Result 형식이라
     같은 화면·같은 잣대(샤프·MDD·칼마·CAGR)로 바로 비교할 수 있습니다.
     """
 
+    model_key: str  # "random_forest" 등 — ml_selection.MODEL_REGISTRY 의 키
+    model_label: str  # 화면에 보여줄 이름(예: "RandomForest")
     k: int  # 샤프지수가 가장 좋았던 K(1~20) — 8대 전략과 동일하게 탐색
-    trained_at: datetime
+    trained_at: datetime  # 학습을 실행한 시각(벽시계) — 아래 둘과 다른 개념
+    trained_from: datetime  # 학습 데이터의 첫 날짜 — "무슨 기간으로 학습했는지"는 이걸 봅니다
+    trained_to: datetime  # 학습 데이터의 마지막 날짜
     rows: int  # 학습에 쓰인 (종목, 날짜) 표본 수
     feature_importances: list[FeatureImportance]
     result: Top5Result
+
+
+class MlLeaderboardRow(BaseModel):
+    model_key: str
+    model_label: str
+    k: int
+    trained_at: datetime
+    trained_from: datetime
+    trained_to: datetime
+    rows: int  # 학습에 쓰인 (종목, 날짜) 표본 수
+    feature_importances: list[FeatureImportance]
+    summary: Top5Summary
+
+
+class MlLeaderboard(BaseModel):
+    """MODEL_REGISTRY 의 모델들을 같은 기간·비용으로 비교합니다. 아직 학습하지
+    않은 모델은 행이 통째로 빠집니다 — 8대 전략 리더보드와 달리 머신러닝은
+    "학습"이라는 사전 단계가 있어서, 안 돌려본 모델은 보여줄 결과가 없습니다.
+    """
+
+    rows: list[MlLeaderboardRow]
 
 
 # ──────────────────────────────────────────────────────────────

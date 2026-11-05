@@ -33,6 +33,7 @@ export type BacktestSummary = {
 export type BacktestResult = { ticker: string; name: string; points: BacktestPoint[]; summary: BacktestSummary }
 
 export type UniverseImportResult = { total: number; inserted: number }
+export type IndexMembersImportResult = { rows: number; upserted: number; new_stocks: number }
 export type UniverseTickerSummary = {
   ticker: string
   name: string
@@ -81,14 +82,32 @@ export type Top5LeaderboardRow = { strategy: Top5Strategy; k: number; summary: T
 export type Top5Leaderboard = { rows: Top5LeaderboardRow[] }
 
 // ── 머신러닝(ML) — Week 8: 전 구간 학습, 분할 없음 ───────
+// 서버 ml_selection.MODEL_REGISTRY 의 키와 똑같이 맞춥니다
+export type MlModelKey = 'random_forest' | 'extra_trees' | 'gradient_boosting' | 'ridge'
 export type MlFeatureImportance = { name: string; importance: number }
 export type MlResult = {
+  model_key: MlModelKey
+  model_label: string
   k: number
-  trained_at: string
+  trained_at: string // 학습을 실행한 시각(벽시계) — 아래 둘과 다른 개념
+  trained_from: string // 학습 데이터의 첫 날짜 — "무슨 기간으로 학습했는지"는 이걸 봅니다
+  trained_to: string // 학습 데이터의 마지막 날짜
   rows: number
   feature_importances: MlFeatureImportance[]
   result: { strategy: string; points: Top5Point[]; summary: Top5Summary; picks: Top5Pick[] }
 }
+export type MlLeaderboardRow = {
+  model_key: MlModelKey
+  model_label: string
+  k: number
+  trained_at: string
+  trained_from: string
+  trained_to: string
+  rows: number
+  feature_importances: MlFeatureImportance[]
+  summary: Top5Summary
+}
+export type MlLeaderboard = { rows: MlLeaderboardRow[] }
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
@@ -249,6 +268,10 @@ export const getBacktestDayNight = (ticker: string, days: number) =>
 // 번들에 들어 있는 코스피 100 종목을 stocks 테이블에 더합니다 — admin 만
 export const importUniverse = () =>
   request<UniverseImportResult>('/api/stocks/import-universe', { method: 'POST' })
+// 번들에 들어 있는 코스피100 시점별 편입 이력을 index_members 테이블에 반영합니다 — admin 만.
+// 생존편향 없이 백테스트하려면(그날 실제로 편입돼 있던 종목만 후보) 이걸 먼저 돌려야 합니다
+export const importIndexMembers = () =>
+  request<IndexMembersImportResult>('/api/index-members/import', { method: 'POST' })
 // tickers 를 비우면 전체 종목, 주면 그 종목들만 골라 평균을 냅니다
 export const getBacktestUniverse = (days: number, tickers?: string[]) =>
   request<UniverseResult>(
@@ -281,26 +304,54 @@ export const getBacktestTop5Leaderboard = (
       (range?.end ? `&end=${range.end}` : ''),
   )
 
-// 저장된 모델을 재학습 없이 불러와 주어진 기간에 대해서만 다시 점수를 매깁니다
+// 저장된 모델 하나를 재학습 없이 불러와 주어진 기간에 대해서만 다시 점수를 매깁니다
 export const getLatestMlResult = (
+  model: MlModelKey,
   days: number,
   cost: number,
   range?: { start?: string; end?: string },
 ) =>
   request<MlResult>(
-    `/api/backtest/ml/latest?days=${days}&cost=${cost}` +
+    `/api/backtest/ml/latest?model=${model}&days=${days}&cost=${cost}` +
       (range?.start ? `&start=${range.start}` : '') +
       (range?.end ? `&end=${range.end}` : ''),
   )
 
-// 구간 분할 없이 전 구간으로 다시 학습하고 모델을 저장합니다 — admin 만
+// 구간 분할 없이 전 구간으로 모델 하나를 다시 학습하고 저장합니다 — admin 만
 export const trainMlModel = (
+  model: MlModelKey,
   days: number,
   cost: number,
   range?: { start?: string; end?: string },
 ) =>
   request<MlResult>(
-    `/api/backtest/ml/train?days=${days}&cost=${cost}` +
+    `/api/backtest/ml/train?model=${model}&days=${days}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+    { method: 'POST' },
+  )
+
+// 이미 학습된 모델들만 모아 재학습 없이 다시 채점 — 아직 안 돌려본 모델은 행이 빠집니다
+export const getMlLeaderboard = (
+  days: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<MlLeaderboard>(
+    `/api/backtest/ml-leaderboard?days=${days}&cost=${cost}` +
+      (range?.start ? `&start=${range.start}` : '') +
+      (range?.end ? `&end=${range.end}` : ''),
+  )
+
+// ml_selection.MODEL_REGISTRY 의 모델 전부를 순서대로 재학습 — admin 만. 모델 4개를
+// 순서대로 학습해 단일 모델 재학습보다 오래 걸립니다
+export const trainAllMlModels = (
+  days: number,
+  cost: number,
+  range?: { start?: string; end?: string },
+) =>
+  request<MlLeaderboard>(
+    `/api/backtest/ml/train-all?days=${days}&cost=${cost}` +
       (range?.start ? `&start=${range.start}` : '') +
       (range?.end ? `&end=${range.end}` : ''),
     { method: 'POST' },

@@ -53,6 +53,28 @@ CREATE TABLE IF NOT EXISTS collection_status (
   message    TEXT
 );
 
+-- 지수 구성종목 이력. 코스피100 은 반기마다 바뀌는데, 지금 종목만 쓰면
+-- 중간에 빠진 종목이 통째로 사라지는 생존편향이 생깁니다. 시점별로 무엇이
+-- 편입되어 있었는지 이 표가 들고 있고, universe.py · selection.py ·
+-- ml_selection.py 가 그날 편입된 종목만 후보로 씁니다.
+CREATE TABLE IF NOT EXISTS index_members (
+  id         SERIAL PRIMARY KEY,
+  index_name TEXT NOT NULL,
+  ticker     TEXT NOT NULL REFERENCES stocks(ticker) ON DELETE CASCADE,
+  start_date DATE NOT NULL,
+  end_date   DATE,                              -- NULL = 지금도 편입 중
+  CHECK (end_date IS NULL OR end_date >= start_date)
+);
+
+-- 같은 종목이 같은 날짜에 다시 편입되는 걸로 재실행해도 줄이 안 늘어나게
+-- 막습니다 (ON CONFLICT 가 이걸 봅니다)
+CREATE UNIQUE INDEX IF NOT EXISTS index_members_unique_idx
+  ON index_members (index_name, ticker, start_date);
+
+-- "이 지수, 이 날짜에 편입되어 있던 종목" 조회가 이걸 씁니다
+CREATE INDEX IF NOT EXISTS index_members_lookup_idx
+  ON index_members (index_name, start_date, end_date);
+
 -- ──────────────────────────────────────────────────────────────
 -- 로그인 · 권한
 -- ──────────────────────────────────────────────────────────────

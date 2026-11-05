@@ -48,10 +48,17 @@ services:
       # 테스트는 이미지에 굽지 않고 붙여서 씁니다 — 고치면 재빌드 없이 바로 돌아갑니다
       - ./backend/tests:/app/tests
       - ./backend/pytest.ini:/app/pytest.ini
+      # 학습된 모델엔 비밀이 없어 KIS 토큰과 달리 휘발시킬 이유가 없습니다 —
+      # 재빌드해도 안 날아가게 전용 볼륨에 둡니다 (호스트·git 으로는 안 나갑니다)
+      - ml-models:/tmp/ml-models
     depends_on:
       timescaledb:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # 발표 당일 임시 조치: OneDrive 동기화 폴더 안이라 --reload(WATCHFILES_FORCE_POLLING)가
+    # OneDrive 의 백그라운드 파일 접근을 "코드가 바뀐 줄" 오인해 무거운 계산 중에도
+    # 수시로 서버를 재시작시켰습니다. 안정성이 더 중요해 일단 껐습니다 — 평소 개발
+    # 때는 다시 --reload 를 붙이는 게 편합니다.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   frontend:
     build:
@@ -84,3 +91,4 @@ services:
 
 volumes:
   timescale-data:
+  ml-models:

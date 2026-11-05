@@ -5,14 +5,17 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from . import db, kis, trading_calendar
 from .schemas import CollectResult
 
 log = logging.getLogger(__name__)
 
-DEFAULT_FULL_DAYS = 365
+# 한 번도 받은 적 없는 종목은 이 날짜부터 받습니다. 코스피100 생존편향 제거를
+# 위해 과거에만 편입되어 있던 종목도 전체 백테스트 구간(2020~)을 받아야 하므로,
+# "오늘부터 며칠 전" 식의 상대 길이가 아니라 고정된 날짜로 둡니다.
+DEFAULT_FULL_START = date(2020, 1, 1)
 
 
 class TickerNotFound(Exception):
@@ -41,7 +44,7 @@ async def collect_incremental_ticker(ticker: str, mode: str) -> CollectResult:
 
     if last is None:
         # 한 번도 받은 적이 없으면 처음 받을 때와 같은 기본 구간으로 전부 받습니다
-        start = today - timedelta(days=DEFAULT_FULL_DAYS)
+        start = DEFAULT_FULL_START
     else:
         start = trading_calendar.next_trading_day_after(open_days, last)
         if start is None:

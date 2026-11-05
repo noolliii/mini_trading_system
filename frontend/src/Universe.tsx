@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import LineChart, { SERIES_COLORS } from './LineChart'
 import type { ChartSeries } from './LineChart'
-import { ApiError, getBacktestUniverse, importUniverse } from './api'
+import { ApiError, getBacktestUniverse, importIndexMembers, importUniverse } from './api'
 import type { Me, UniverseResult } from './api'
 
 type Props = {
@@ -24,9 +24,12 @@ function pct(v: number): string {
 /**
  * 유니버스 — 등록된 전체 종목의 동일가중 낮 vs 밤 vs 단순보유 비교.
  *
- * "가져오기"는 번들에 들어 있는 kospi100.csv 를 stocks 테이블에 더할 뿐이고,
- * 실제 일봉은 「시세」탭의 "증분 수집"으로 받습니다. 종목을 한 개씩 더하는
- * 칸도 「시세」탭에 있습니다 — 여기서는 늘 등록된 종목 전체로 계산합니다.
+ * "종목 가져오기"는 번들에 들어 있는 kospi100.csv(현재 명단)를 stocks 테이블에
+ * 더할 뿐이고, "편입 이력 가져오기"는 kospi100_history.csv(시점별 편입 이력)를
+ * index_members 테이블에 반영해 생존편향을 없앱니다 — 이걸 돌려야 지금은 빠진
+ * 종목도 그 종목이 편입돼 있던 기간만큼은 백테스트에 남습니다. 실제 일봉은
+ * 「시세」탭의 "증분 수집"으로 받습니다. 종목을 한 개씩 더하는 칸도 「시세」탭에
+ * 있습니다 — 여기서는 늘 등록된 종목 전체로 계산합니다.
  */
 export default function Universe({ me, onSessionLost }: Props) {
   const [days, setDays] = useState(365)
@@ -34,6 +37,7 @@ export default function Universe({ me, onSessionLost }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [busyMembers, setBusyMembers] = useState(false)
 
   const canWrite = me.permissions.includes('market:write')
 
@@ -79,6 +83,25 @@ export default function Universe({ me, onSessionLost }: Props) {
     }
   }
 
+  const doImportMembers = async () => {
+    setBusyMembers(true)
+    setNotice(null)
+    try {
+      const r = await importIndexMembers()
+      setNotice(
+        `코스피100 편입 이력 ${r.upserted}구간을 반영했습니다 (신규 종목 ${r.new_stocks}개 추가). ` +
+          '이제 유니버스 · Top-K · 머신러닝 백테스트가 그날 실제로 편입돼 있던 종목만 씁니다. ' +
+          '일봉은 「시세」탭의 "증분 수집"으로 받으세요.',
+      )
+      setError(null)
+      await load()
+    } catch (e) {
+      handle(e)
+    } finally {
+      setBusyMembers(false)
+    }
+  }
+
   const series: ChartSeries[] = useMemo(() => {
     if (!data || data.points.length === 0) return []
     return [
@@ -110,6 +133,11 @@ export default function Universe({ me, onSessionLost }: Props) {
         {canWrite && (
           <button onClick={() => void doImport()} disabled={busy}>
             {busy ? '가져오는 중…' : '코스피 100 종목 가져오기'}
+          </button>
+        )}
+        {canWrite && (
+          <button onClick={() => void doImportMembers()} disabled={busyMembers}>
+            {busyMembers ? '반영하는 중…' : '코스피100 편입 이력 가져오기 (생존편향 보정)'}
           </button>
         )}
       </div>

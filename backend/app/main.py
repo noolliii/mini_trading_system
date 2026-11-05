@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import logging
 import os
@@ -24,10 +25,13 @@ from .schemas import (
     CollectionStatus,
     CollectResult,
     FeatureImportance,
+    IndexMembersImportResult,
     LoginIn,
     LoginOut,
     Me,
     MeUpdate,
+    MlLeaderboard,
+    MlLeaderboardRow,
     MlResult,
     SignupIn,
     Stock,
@@ -48,6 +52,8 @@ from .schemas import (
 )
 
 KOSPI100_CSV = Path(__file__).parent / "data" / "kospi100.csv"
+KOSPI100_HISTORY_CSV = Path(__file__).parent / "data" / "kospi100_history.csv"
+INDEX_NAME_KOSPI100 = "KOSPI100"
 
 # uvicorn 은 자기 로거만 챙깁니다. 우리 모듈(app.kis 등)의 로그도 보이게 켭니다
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
@@ -768,6 +774,68 @@ async def _fetch_candles(
     return [Candle(**dict(r)) for r in rows]
 
 
+async def _fetch_index_members(
+    conn: asyncpg.Connection, index_name: str
+) -> dict[str, list[tuple[date, date | None]]]:
+    """그 지수에 한 번이라도 편입된 적 있는 종목별 편입구간 목록."""
+    rows = await conn.fetch(
+        "SELECT ticker, start_date, end_date FROM index_members WHERE index_name = $1",
+        index_name,
+    )
+    intervals: dict[str, list[tuple[date, date | None]]] = {}
+    for r in rows:
+        intervals.setdefault(r["ticker"], []).append((r["start_date"], r["end_date"]))
+    return intervals
+
+
+def _was_member_on(intervals: list[tuple[date, date | None]], day: date) -> bool:
+    """end_date 는 "그날부터 빠짐"이라 그 전날까지만 포함(반열림구간)합니다."""
+    return any(start <= day and (end is None or day < end) for start, end in intervals)
+
+
+async def _fetch_universe_candles(
+    conn: asyncpg.Connection,
+    days: int,
+    start: date | None,
+    end: date | None,
+    wanted: set[str] | None = None,
+    index_name: str = INDEX_NAME_KOSPI100,
+) -> dict[str, list[Candle]]:
+    """그날그날 지수에 실제로 편입되어 있던 종목의 일봉만 모읍니다.
+
+    유니버스·Top-K·머신러닝 백테스트가 전부 이걸 거쳐야 생존편향이 없습니다 —
+    지금은 빠졌어도 그 시점엔 편입되어 있던 종목이 후보에 남고, 반대로 그
+    시점에 아직 편입 전이던 종목(또는 index_members 에 이력이 아예 없는
+    수업용 시드 종목)은 후보에서 빠집니다.
+    """
+    start_ts, end_ts = _range_bounds(start, end)
+    candle_rows = await conn.fetch(
+        """
+        SELECT ticker, time, open, high, low, close, volume
+        FROM daily_candles
+        WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
+          AND time <= COALESCE($3::timestamptz, now())
+        ORDER BY ticker, time
+        """,
+        start_ts,
+        days,
+        end_ts,
+    )
+    intervals = await _fetch_index_members(conn, index_name)
+
+    by_ticker: dict[str, list[Candle]] = {}
+    for r in candle_rows:
+        ticker = r["ticker"]
+        if wanted is not None and ticker not in wanted:
+            continue
+        member_intervals = intervals.get(ticker)
+        if not member_intervals or not _was_member_on(member_intervals, r["time"].date()):
+            continue
+        by_ticker.setdefault(ticker, []).append(Candle(**dict(r)))
+
+    return by_ticker
+
+
 @app.get("/api/backtest/day-night", response_model=BacktestResult)
 async def backtest_day_night(
     user: CurrentUserDep,
@@ -829,6 +897,63 @@ async def import_universe(user: CurrentUserDep) -> UniverseImportResult:
     return UniverseImportResult(total=len(rows), inserted=after - before)
 
 
+@app.post("/api/index-members/import", response_model=IndexMembersImportResult)
+async def import_index_members(user: CurrentUserDep) -> IndexMembersImportResult:
+    """번들에 들어 있는 코스피 100 편입 이력을 index_members 테이블에 반영합니다.
+
+    과거에만 편입되어 있던 종목(지금은 kospi100.csv 에 없는 종목)도 stocks 에
+    먼저 채워 넣습니다 — index_members.ticker 가 stocks 를 참조하기 때문입니다.
+    같은 종목 · 같은 편입일은 덮어쓰므로 다시 실행해도 안전합니다.
+    """
+    auth.require(user, "market:write")
+
+    with KOSPI100_HISTORY_CSV.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = [
+            (
+                r["ticker"],
+                r["name"],
+                date.fromisoformat(r["start_date"]),
+                date.fromisoformat(r["end_date"]) if r["end_date"] else None,
+            )
+            for r in reader
+        ]
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            stocks_before = await conn.fetchval("SELECT count(*) FROM stocks")
+
+            await conn.executemany(
+                """
+                INSERT INTO stocks (ticker, name, market)
+                VALUES ($1, $2, 'KOSPI')
+                ON CONFLICT (ticker) DO NOTHING
+                """,
+                [(ticker, name) for ticker, name, _, _ in rows],
+            )
+            stocks_after = await conn.fetchval("SELECT count(*) FROM stocks")
+
+            await conn.executemany(
+                """
+                INSERT INTO index_members (index_name, ticker, start_date, end_date)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (index_name, ticker, start_date)
+                DO UPDATE SET end_date = EXCLUDED.end_date
+                """,
+                [(INDEX_NAME_KOSPI100, ticker, start, end) for ticker, _, start, end in rows],
+            )
+            upserted = await conn.fetchval(
+                "SELECT count(*) FROM index_members WHERE index_name = $1",
+                INDEX_NAME_KOSPI100,
+            )
+
+    return IndexMembersImportResult(
+        rows=len(rows),
+        upserted=upserted,
+        new_stocks=stocks_after - stocks_before,
+    )
+
+
 @app.get("/api/backtest/universe", response_model=UniverseResult)
 async def backtest_universe(
     user: CurrentUserDep,
@@ -846,31 +971,12 @@ async def backtest_universe(
     _validate_range(start, end)
 
     wanted = {t.strip() for t in tickers.split(",") if t.strip()} if tickers else None
-    start_ts, end_ts = _range_bounds(start, end)
 
     async with db.acquire() as conn:
         stock_rows = await conn.fetch("SELECT ticker, name FROM stocks ORDER BY ticker")
-        candle_rows = await conn.fetch(
-            """
-            SELECT ticker, time, open, high, low, close, volume
-            FROM daily_candles
-            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
-              AND time <= COALESCE($3::timestamptz, now())
-            ORDER BY ticker, time
-            """,
-            start_ts,
-            days,
-            end_ts,
-        )
+        by_ticker = await _fetch_universe_candles(conn, days, start, end, wanted)
 
-    names = {
-        r["ticker"]: r["name"] for r in stock_rows if wanted is None or r["ticker"] in wanted
-    }
-    by_ticker: dict[str, list[Candle]] = {}
-    for r in candle_rows:
-        if wanted is not None and r["ticker"] not in wanted:
-            continue
-        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+    names = {r["ticker"]: r["name"] for r in stock_rows}
 
     result = universe.compute_universe(
         {ticker: (names.get(ticker, ticker), candles) for ticker, candles in by_ticker.items()}
@@ -904,28 +1010,15 @@ async def backtest_top5(
     """
     auth.require(user, "market:read")
     _validate_range(start, end)
-    start_ts, end_ts = _range_bounds(start, end)
 
     async with db.acquire() as conn:
-        candle_rows = await conn.fetch(
-            """
-            SELECT ticker, time, open, high, low, close, volume
-            FROM daily_candles
-            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
-              AND time <= COALESCE($3::timestamptz, now())
-            ORDER BY ticker, time
-            """,
-            start_ts,
-            days,
-            end_ts,
-        )
-
-    by_ticker: dict[str, list[Candle]] = {}
-    for r in candle_rows:
-        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
 
     try:
-        result = selection.backtest_top_k(by_ticker, strategy, k=k, cost=cost)
+        # 순수 CPU 연산이라 스레드로 돌립니다 — 그래야 계산하는 동안 다른 요청(로그인,
+        # 다른 화면 조회 등)이 이벤트루프에서 계속 처리됩니다. 안 그러면 한 사람의
+        # 무거운 백테스트가 서버 전체를 멈추게 합니다(실제로 겪은 버그).
+        result = await asyncio.to_thread(selection.backtest_top_k, by_ticker, strategy, k=k, cost=cost)
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": "invalid_strategy", "message": str(e)})
 
@@ -952,29 +1045,13 @@ async def backtest_top5_leaderboard(
     """
     auth.require(user, "market:read")
     _validate_range(start, end)
-    start_ts, end_ts = _range_bounds(start, end)
 
     async with db.acquire() as conn:
-        candle_rows = await conn.fetch(
-            """
-            SELECT ticker, time, open, high, low, close, volume
-            FROM daily_candles
-            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
-              AND time <= COALESCE($3::timestamptz, now())
-            ORDER BY ticker, time
-            """,
-            start_ts,
-            days,
-            end_ts,
-        )
-
-    by_ticker: dict[str, list[Candle]] = {}
-    for r in candle_rows:
-        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
 
     rows = []
     for strategy in selection.STRATEGIES:
-        best_k, result = selection.best_k_result(by_ticker, strategy, cost=cost)
+        best_k, result = await asyncio.to_thread(selection.best_k_result, by_ticker, strategy, cost=cost)
         rows.append(
             Top5LeaderboardRow(
                 strategy=strategy,
@@ -988,8 +1065,12 @@ async def backtest_top5_leaderboard(
 
 def _to_ml_result(ml_result: ml_selection.MlResult) -> MlResult:
     return MlResult(
+        model_key=ml_result.model_key,
+        model_label=ml_result.model_label,
         k=ml_result.k,
         trained_at=ml_result.trained_at,
+        trained_from=ml_result.trained_from,
+        trained_to=ml_result.trained_to,
         rows=ml_result.rows,
         feature_importances=[FeatureImportance(**vars(f)) for f in ml_result.feature_importances],
         result=Top5Result(
@@ -1001,52 +1082,64 @@ def _to_ml_result(ml_result: ml_selection.MlResult) -> MlResult:
     )
 
 
+def _to_ml_leaderboard_row(ml_result: ml_selection.MlResult) -> MlLeaderboardRow:
+    return MlLeaderboardRow(
+        model_key=ml_result.model_key,
+        model_label=ml_result.model_label,
+        k=ml_result.k,
+        trained_at=ml_result.trained_at,
+        trained_from=ml_result.trained_from,
+        trained_to=ml_result.trained_to,
+        rows=ml_result.rows,
+        feature_importances=[FeatureImportance(**vars(f)) for f in ml_result.feature_importances],
+        summary=Top5Summary(**vars(ml_result.result.summary)),
+    )
+
+
+# ml/latest · ml-leaderboard 전용 캐시 — 재학습 없이 "조회"만 누르면 매번 똑같은
+# K=1~20 스윕을 전체기간·모델 여러 개로 반복하게 되는데, 일봉이 그대로인 한 결과도
+# 항상 같습니다. /train · /train-all 로 모델이 바뀔 때만 비웁니다. 신규 일봉이
+# 들어오는 경우까지는 안 보고 있습니다 — 발표용으로 꼭 필요한 선에서만 캐시합니다.
+_ml_cache: dict[tuple, object] = {}
+
+
 @app.post("/api/backtest/ml/train", response_model=MlResult)
 async def backtest_ml_train(
     user: CurrentUserDep,
+    model: str = Query("random_forest", description="ml_selection.MODEL_REGISTRY 의 키"),
     days: int = Query(365, ge=30, le=3650),
     cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
     start: date | None = Query(None, description="학습 시작일. 주면 days 대신 이 날짜부터"),
     end: date | None = Query(None, description="학습 종료일. 비우면 지금까지"),
 ) -> MlResult:
-    """구간을 나누지 않고 받은 기간 전체로 랜덤포레스트를 학습해 모델을 저장합니다(admin 전용).
+    """구간을 나누지 않고 받은 기간 전체로 model 하나를 학습해 저장합니다(admin 전용).
 
     선택은 8대 비머신러닝 전략과 똑같은 경로(selection.best_k_from_scores)를 타서
     비용차감·샤프·MDD·칼마·CAGR 계산 방식이 완전히 같습니다 — 비교가 공정합니다.
     """
     auth.require(user, "market:write")
     _validate_range(start, end)
-    start_ts, end_ts = _range_bounds(start, end)
+    if model not in ml_selection.MODEL_REGISTRY:
+        raise HTTPException(status_code=422, detail={"code": "invalid_model", "message": f"알 수 없는 머신러닝 모델입니다: {model}"})
 
     async with db.acquire() as conn:
-        candle_rows = await conn.fetch(
-            """
-            SELECT ticker, time, open, high, low, close, volume
-            FROM daily_candles
-            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
-              AND time <= COALESCE($3::timestamptz, now())
-            ORDER BY ticker, time
-            """,
-            start_ts,
-            days,
-            end_ts,
-        )
-
-    by_ticker: dict[str, list[Candle]] = {}
-    for r in candle_rows:
-        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
 
     try:
-        result = ml_selection.train_and_save(by_ticker, cost=cost)
+        # 트리 앙상블은 수백 개 트리를 돌리는 무거운 동기 연산이라, 스레드로
+        # 빼지 않으면 학습하는 동안 서버가 다른 요청을 전혀 못 받습니다.
+        result = await asyncio.to_thread(ml_selection.train_and_save, by_ticker, cost=cost, model_key=model)
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": "insufficient_data", "message": str(e)})
 
+    _ml_cache.clear()  # 모델이 바뀌었으니 이전 조회 결과는 더 이상 맞지 않습니다
     return _to_ml_result(result)
 
 
 @app.get("/api/backtest/ml/latest", response_model=MlResult)
 async def backtest_ml_latest(
     user: CurrentUserDep,
+    model: str = Query("random_forest", description="ml_selection.MODEL_REGISTRY 의 키"),
     days: int = Query(365, ge=30, le=3650),
     cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
     start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
@@ -1055,29 +1148,79 @@ async def backtest_ml_latest(
     """저장된 모델을 재학습 없이 불러와, 주어진 기간에 대해서만 다시 점수를 매깁니다."""
     auth.require(user, "market:read")
     _validate_range(start, end)
-    start_ts, end_ts = _range_bounds(start, end)
+
+    cache_key = ("latest", model, days, cost, start, end)
+    if cache_key in _ml_cache:
+        return _ml_cache[cache_key]
 
     async with db.acquire() as conn:
-        candle_rows = await conn.fetch(
-            """
-            SELECT ticker, time, open, high, low, close, volume
-            FROM daily_candles
-            WHERE time >= COALESCE($1::timestamptz, now() - make_interval(days => $2))
-              AND time <= COALESCE($3::timestamptz, now())
-            ORDER BY ticker, time
-            """,
-            start_ts,
-            days,
-            end_ts,
-        )
-
-    by_ticker: dict[str, list[Candle]] = {}
-    for r in candle_rows:
-        by_ticker.setdefault(r["ticker"], []).append(Candle(**dict(r)))
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
 
     try:
-        result = ml_selection.load_and_score(by_ticker, cost=cost)
+        result = await asyncio.to_thread(ml_selection.load_and_score, by_ticker, cost=cost, model_key=model)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "invalid_model", "message": str(e)})
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail={"code": "model_not_trained", "message": str(e)})
 
-    return _to_ml_result(result)
+    out = _to_ml_result(result)
+    _ml_cache[cache_key] = out
+    return out
+
+
+@app.post("/api/backtest/ml/train-all", response_model=MlLeaderboard)
+async def backtest_ml_train_all(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=30, le=3650),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="학습 시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="학습 종료일. 비우면 지금까지"),
+) -> MlLeaderboard:
+    """ml_selection.MODEL_REGISTRY 의 모델을 전부 재학습해 저장합니다(admin 전용).
+
+    8대 전략 리더보드처럼, 모델 종류별로 샤프지수가 가장 좋은 K 를 각자 찾아
+    한 화면에서 비교합니다. 모델 4개를 순서대로 학습하므로 단일 모델보다 오래
+    걸립니다 — 스레드로 돌려 그동안도 서버가 다른 요청을 받을 수 있게 합니다.
+    """
+    auth.require(user, "market:write")
+    _validate_range(start, end)
+
+    async with db.acquire() as conn:
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
+
+    try:
+        results = await asyncio.to_thread(ml_selection.train_all_and_save, by_ticker, cost=cost)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "insufficient_data", "message": str(e)})
+
+    _ml_cache.clear()  # 모델 4개가 전부 바뀌었으니 이전 조회 결과는 더 이상 맞지 않습니다
+    return MlLeaderboard(rows=[_to_ml_leaderboard_row(r) for r in results])
+
+
+@app.get("/api/backtest/ml-leaderboard", response_model=MlLeaderboard)
+async def backtest_ml_leaderboard(
+    user: CurrentUserDep,
+    days: int = Query(365, ge=30, le=3650),
+    cost: float = Query(0.0, ge=0, le=0.05, description="왕복 거래비용 비율. 예: 0.001 = 0.1%"),
+    start: date | None = Query(None, description="시작일. 주면 days 대신 이 날짜부터"),
+    end: date | None = Query(None, description="종료일. 비우면 지금까지"),
+) -> MlLeaderboard:
+    """이미 학습된 모델들만 모아 재학습 없이 다시 채점합니다.
+
+    아직 한 번도 학습하지 않은 모델은 행에서 빠집니다 — admin 이 "전체 모델 재학습"을
+    돌리기 전까지는 리더보드가 비어 있거나 일부만 찰 수 있습니다.
+    """
+    auth.require(user, "market:read")
+    _validate_range(start, end)
+
+    cache_key = ("leaderboard", days, cost, start, end)
+    if cache_key in _ml_cache:
+        return _ml_cache[cache_key]
+
+    async with db.acquire() as conn:
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
+
+    results = await asyncio.to_thread(ml_selection.load_all_and_score, by_ticker, cost=cost)
+    out = MlLeaderboard(rows=[_to_ml_leaderboard_row(r) for r in results])
+    _ml_cache[cache_key] = out
+    return out
