@@ -374,7 +374,7 @@ def _train_model(
 
         loss_curve.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
 
-        if val_loss < best_val - 1e-6:
+        if val_loss < best_val:
             best_val = val_loss
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
