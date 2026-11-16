@@ -148,6 +148,12 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 - `hyperparams`·`param_count`·`loss_curve` 는 신경망(`neural_net`)만 채웁니다
 - `points` 는 그 구간의 `[{time, cum_portfolio, cum_universe}, ...]` — 화면의 OOS 누적수익률 차트가 씁니다
 - 저장: `POST /api/backtest/nn/train-is`(admin) · 조회: `GET /api/backtest/nn/latest`(전원)
+- `generation = 'neural_net'`, `model_key = 'search_winner'` 인 세 줄은 탐색 도구
+  (`python -m app.nn_search`)가 Val 샤프로 고른 최종 모델 하나입니다. `hyperparams` 에
+  `members`(앙상블 구성원) · `configs_tried` · `candidates_compared` · `member_details`
+  (구성원별 설정 · 파라미터 수 · 선택 epoch · epoch 별 손실 곡선) 를 남기고, `param_count` 는
+  구성원 합계입니다(`loss_curve` 칼럼은 구성원이 여럿이라 비웁니다). 조회 API 는 이 줄을 신경망 5종과 섞지 않고
+  `search_winner` 항목으로 따로 돌려줍니다. `train-is` 는 이 줄을 건드리지 않습니다
 
 ## 눈으로 확인한 것
 

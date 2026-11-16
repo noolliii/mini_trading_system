@@ -6,9 +6,10 @@ export type ChartSeries = { key: string; name: string; points: ChartPoint[] }
 
 /**
  * 범주형 팔레트 고정 슬롯. 순서 자체가 색약 안전성을 담보하므로 돌려쓰지 않습니다.
- * 4개 이상이면 상위 3개만 그리고 나머지는 접습니다.
+ * 5개 이상이면 상위 4개만 그리고 나머지는 접습니다. 네 번째(붉은 보라)는 Week 10 의
+ * 「탐색 최고」 선 때문에 추가했습니다 — 파랑 · 주황 · 초록과 색약에서도 구분되는 색입니다.
  */
-export const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)']
+export const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)']
 export const MAX_SERIES = SERIES_COLORS.length
 
 const HEIGHT = 320

@@ -262,6 +262,22 @@ class GenerationResult(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SearchWinner(GenerationResult):
+    """탐색 도구(`python -m app.nn_search`)가 Val 샤프로 고른 최종 모델 하나.
+
+    신경망 5종 기본 설정과 달리 여러 설정·앙상블 중에서 고른 결과라, 몇 개를
+    시험했는지(configs_tried · candidates_compared)를 반드시 함께 내려보냅니다.
+    """
+
+    members: list[str]  # 앙상블 구성원 이름(단일 모델이면 하나)
+    configs_tried: int
+    candidates_compared: int
+    param_count: int | None = None  # 신경망 구성원 전체의 파라미터 수 합
+    # 신경망 구성원마다 {name, seed, param_count, best_epoch, epochs, train_loss, val_loss, ...}
+    # — train_loss · val_loss 는 가중치를 고른 epoch(best_epoch)의 값입니다
+    member_details: list[dict] = []
+
+
 class ComparisonReport(BaseModel):
     """룰베이스 최고 vs 전통ML 최고 vs 신경망(5종) — 같은 Train(IS)/Val/OOS 구간·
     같은 Top-5·같은 비용으로 비교한 Week 10 결과입니다.
@@ -271,6 +287,8 @@ class ComparisonReport(BaseModel):
     traditional_ml: GenerationResult
     neural_net_best: GenerationResult
     neural_net_all: list[NnArchResult]
+    # 탐색 도구(nn_search.py)를 돌린 적이 없으면 None 입니다
+    search_winner: SearchWinner | None = None
 
 
 # ──────────────────────────────────────────────────────────────

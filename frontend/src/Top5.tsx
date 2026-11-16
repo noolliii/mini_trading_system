@@ -98,6 +98,9 @@ function pct(v: number): string {
  */
 type LeaderboardRow = { value: Top5Strategy; label: string; hint: string; k: number; summary: Top5Summary }
 
+// 초과수익률 타깃은 손실이 1e-5 단위라 소수 넷째 자리로는 전부 0.0000 으로 보입니다
+const fmtLoss = (v: number) => v.toExponential(2)
+
 export default function Top5({ me, onSessionLost }: Props) {
   const [strategy, setStrategy] = useState<Top5Strategy>('momentum')
   const [days, setDays] = useState(365)
@@ -343,17 +346,19 @@ export default function Top5({ me, onSessionLost }: Props) {
   const handleTrainNn = useCallback(async () => {
     setNnTraining(true)
     try {
-      setNnReport(await trainNnComparison(3650, costPct / 100))
-      setNnStatus(null)
+      await trainNnComparison(3650, costPct / 100)
+      // 재학습 응답에는 탐색 최고(search_winner)가 없어서, 저장된 결과를 다시 읽어 옵니다
+      await loadNn()
     } catch (e) {
       handle(e)
     } finally {
       setNnTraining(false)
     }
-  }, [costPct, handle])
+  }, [costPct, handle, loadNn])
 
   const nnOosSeries: ChartSeries[] = useMemo(() => {
     if (!nnReport) return []
+    const winner = nnReport.search_winner
     return [
       {
         key: 'rule',
@@ -370,18 +375,70 @@ export default function Top5({ me, onSessionLost }: Props) {
         name: `신경망 최고 (${nnReport.neural_net_best.model_label})`,
         points: nnReport.neural_net_best.oos.points.map((p) => ({ t: p.time, v: p.cum_portfolio })),
       },
+      ...(winner
+        ? [
+            {
+              key: 'search',
+              name: `탐색 최고 (${winner.model_label})`,
+              points: winner.oos.points.map((p) => ({ t: p.time, v: p.cum_portfolio })),
+            },
+          ]
+        : []),
     ]
+  }, [nnReport])
+
+  // 탐색 최고(앙상블)의 loss — 구성원마다 가중치를 고른 epoch 의 값을 평균합니다
+  const winnerLoss = useMemo(() => {
+    const details = (nnReport?.search_winner?.member_details ?? []).filter(
+      (m): m is typeof m & { train_loss: number; val_loss: number } => m.train_loss !== null && m.val_loss !== null,
+    )
+    if (details.length === 0) return null
+    return {
+      train: details.reduce((sum, m) => sum + m.train_loss, 0) / details.length,
+      val: details.reduce((sum, m) => sum + m.val_loss, 0) / details.length,
+    }
+  }, [nnReport])
+
+  // 앙상블의 파라미터 수는 "모델 하나 × 개수"로 적습니다 — 합계만 쓰면 단일 모델 행과
+  // 나란히 놓였을 때 모델 하나가 그만큼 큰 것처럼 읽힙니다
+  const winnerParams = useMemo(() => {
+    const winner = nnReport?.search_winner
+    if (!winner || winner.param_count === null) return null
+    const counts = winner.member_details.map((m) => m.param_count)
+    const total = winner.param_count.toLocaleString()
+    if (counts.length > 1 && counts.every((c) => c === counts[0])) {
+      return `${counts[0].toLocaleString()} × ${counts.length}개 (합 ${total})`
+    }
+    return counts.length > 1 ? `합 ${total} (${counts.length}개)` : total
   }, [nnReport])
 
   const PERIOD_LABELS: Record<PeriodKey, string> = { is: 'Train(IS)', val: 'Val', oos: 'OOS' }
 
-  const nnRows = useMemo(() => {
+  // 구간마다 룰베이스 · 전통ML · 신경망 대표, 그리고 탐색을 돌렸다면 탐색 최고까지 한 묶음입니다
+  const nnGroups = useMemo(() => {
     if (!nnReport) return []
-    const generations: GenerationResult[] = [nnReport.rule_based, nnReport.traditional_ml, nnReport.neural_net_best]
-    return (['is', 'val', 'oos'] as const).flatMap((period) =>
-      generations.map((g) => ({ period, generation: g.generation, label: g.model_label, k: g.k, summary: g[period].summary })),
-    )
+    const groups: { title: string; result: GenerationResult }[] = [
+      { title: '룰베이스 최고', result: nnReport.rule_based },
+      { title: '전통ML 최고', result: nnReport.traditional_ml },
+      { title: '신경망 최고', result: nnReport.neural_net_best },
+    ]
+    if (nnReport.search_winner) groups.push({ title: '탐색 최고', result: nnReport.search_winner })
+    return groups
   }, [nnReport])
+
+  const nnRows = useMemo(
+    () =>
+      (['is', 'val', 'oos'] as const).flatMap((period) =>
+        nnGroups.map((g) => ({
+          period,
+          title: g.title,
+          label: g.result.model_label,
+          k: g.result.k,
+          summary: g.result[period].summary,
+        })),
+      ),
+    [nnGroups],
+  )
 
   const rankedLeaderboard = useMemo(
     () => (leaderboard ? [...leaderboard].sort((a, b) => b.summary.calmar - a.summary.calmar) : []),
@@ -792,16 +849,13 @@ export default function Top5({ me, onSessionLost }: Props) {
               </thead>
               <tbody>
                 {nnRows.map((row, i) => (
-                  <tr key={`${row.period}-${row.generation}`} style={row.period === 'oos' ? { fontWeight: 600 } : undefined}>
-                    {i % 3 === 0 && (
-                      <td rowSpan={3} className="mono">
+                  <tr key={`${row.period}-${row.title}`} style={row.period === 'oos' ? { fontWeight: 600 } : undefined}>
+                    {i % nnGroups.length === 0 && (
+                      <td rowSpan={nnGroups.length} className="mono">
                         {PERIOD_LABELS[row.period]}
                       </td>
                     )}
-                    <td>
-                      {row.generation === 'rule_based' ? '룰베이스 최고' : row.generation === 'traditional_ml' ? '전통ML 최고' : '신경망 최고'}
-                      {` (${row.label})`}
-                    </td>
+                    <td>{`${row.title} (${row.label})`}</td>
                     <td>{row.k}</td>
                     <td className="mono">{pct(row.summary.final_portfolio)}</td>
                     <td className="mono">{pct(row.summary.cagr)}</td>
@@ -813,6 +867,16 @@ export default function Top5({ me, onSessionLost }: Props) {
               </tbody>
             </table>
           </div>
+
+          {nnReport.search_winner && (
+            <div className="hint" style={{ margin: '8px 0' }}>
+              「탐색 최고」는 단일 설정 {nnReport.search_winner.configs_tried}개와 최종 후보{' '}
+              {nnReport.search_winner.candidates_compared}개 중 Val 샤프가 가장 높은 것을 고른 결과입니다(구성원{' '}
+              {nnReport.search_winner.members.length}개의 순위 평균). 많이 시험해 고른 만큼 Val 샤프는 부풀려져
+              있고, OOS 는 이 모델 하나에 대해서만 마지막에 한 번 계산했습니다. 「전체 재학습」으로는 갱신되지
+              않습니다.
+            </div>
+          )}
 
           <div className="hint" style={{ margin: '8px 0' }}>
             OOS(표본밖) 구간 누적수익률 — 학습·튜닝에 전혀 관여하지 않은 구간입니다
@@ -855,13 +919,45 @@ export default function Top5({ me, onSessionLost }: Props) {
                         <td className="mono">{arch.val.summary.sharpe.toFixed(2)}</td>
                         <td className="mono">{arch.oos.summary.sharpe.toFixed(2)}</td>
                         <td className="mono">
-                          {lastLoss ? `${lastLoss.train_loss.toFixed(4)} / ${lastLoss.val_loss.toFixed(4)}` : '-'}
+                          {lastLoss ? `${fmtLoss(lastLoss.train_loss)} / ${fmtLoss(lastLoss.val_loss)}` : '-'}
                         </td>
                       </tr>
                     )
                   })}
+                  {/* 탐색 최고는 5종 기본 설정과 조건이 달라(19피처 · 설정 탐색 · 앙상블) 맨 아래에 따로 둡니다 */}
+                  {nnReport.search_winner && (
+                    <tr>
+                      <td>{`탐색 최고 (${nnReport.search_winner.model_label})`}</td>
+                      <td>{`구성원 ${nnReport.search_winner.members.length}개 순위 평균`}</td>
+                      <td>
+                        {winnerParams ?? '-'}
+                      </td>
+                      <td className="mono">{nnReport.search_winner.is.summary.sharpe.toFixed(2)}</td>
+                      <td className="mono">{nnReport.search_winner.val.summary.sharpe.toFixed(2)}</td>
+                      <td className="mono">{nnReport.search_winner.oos.summary.sharpe.toFixed(2)}</td>
+                      <td className="mono">{winnerLoss ? `${fmtLoss(winnerLoss.train)} / ${fmtLoss(winnerLoss.val)} (평균)` : '-'}</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
+              {nnReport.search_winner && (
+                <div className="hint" style={{ margin: '8px 0' }}>
+                  탐색 최고 구성원: {nnReport.search_winner.members.join(' · ')}
+                  <br />
+                  {nnReport.search_winner.member_details.length > 0 && (
+                    <>
+                      구성원별 선택 epoch / 학습한 epoch:{' '}
+                      {nnReport.search_winner.member_details
+                        .map((m) => `시드 ${m.seed} — ${m.best_epoch}/${m.epochs}`)
+                        .join(' · ')}
+                      . 탐색 최고의 loss 는 구성원마다 가중치를 고른 epoch 의 값을 평균한 것입니다.
+                      <br />
+                    </>
+                  )}
+                  이름은 아키텍처 | 피처 세트(extended = 19개) | hidden | dropout | weight decay | 학습률 | 시드 순입니다. 🏆 는
+                  기본 설정 5종 중 대표입니다.
+                </div>
+              )}
             </div>
           )}
         </>

@@ -7,7 +7,7 @@
 """
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -182,3 +182,150 @@ def test_train_and_score_rejects_insufficient_training_data() -> None:
         train_and_score(
             universe, "mlp", train_end=START + timedelta(days=5), val_end=START + timedelta(days=10)
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# 확장 피처 세트(룰베이스 점수 + 원시 캔들 변화) · 순위 평균 앙상블
+# ──────────────────────────────────────────────────────────────
+
+
+def test_extended_features_never_look_at_future_candles() -> None:
+    from app.nn_selection import EXTENDED_FEATURE_NAMES
+
+    base = _make_synthetic_universe()
+    mutated = {t: list(cs) for t, cs in base.items()}
+    for t in mutated:
+        last = mutated[t][-1]
+        mutated[t][-1] = Candle(time=last.time, open=9999, high=20000, low=1, close=15000, volume=999)
+
+    walk_base = _walk_all(base, "extended")
+    walk_mutated = _walk_all(mutated, "extended")
+
+    assert walk_base.norm_features[:-1] == walk_mutated.norm_features[:-1]
+    assert walk_base.seq_features[:-1] == walk_mutated.seq_features[:-1]
+
+    first = next(f for f in walk_base.norm_features if f)
+    for values in first.values():
+        assert len(values) == len(EXTENDED_FEATURE_NAMES)
+        assert all(-0.5 <= v <= 0.5 for v in values)
+
+
+def test_walk_all_rejects_unknown_feature_set() -> None:
+    with pytest.raises(ValueError):
+        _walk_all(_make_synthetic_universe(), "전부")
+
+
+def test_rank_average_treats_missing_ticker_as_lowest() -> None:
+    from app.nn_search import rank_average
+
+    a = [{"X": 3.0, "Y": 2.0, "Z": 1.0}]
+    b = [{"X": 0.1, "Y": 0.9}]  # Z 는 점수가 없어 이 구성원 안에서 최하위
+    merged = rank_average([a, b])[0]
+
+    assert merged["Z"] == pytest.approx(-0.5)
+    assert merged["X"] == pytest.approx(merged["Y"])  # 한쪽 1등 · 다른 쪽 2등으로 서로 엇갈림
+    assert merged["X"] > merged["Z"]
+
+
+def test_rank_average_orders_tickers_deterministically() -> None:
+    """동점 종목의 순서가 실행마다 달라지면 Top-K 가 바뀝니다 — 항상 종목코드 순이어야 합니다."""
+    from app.nn_search import rank_average
+
+    a = [{"C": 1.0, "A": 1.0, "B": 1.0, "D": 1.0}]
+    b = [{"D": 2.0, "B": 2.0, "A": 2.0, "C": 2.0}]
+
+    assert list(rank_average([a, b])[0]) == ["A", "B", "C", "D"]
+
+
+def test_winner_rows_are_three_periods_under_one_fixed_key() -> None:
+    """탐색 승자는 항상 같은 키로 is · val · oos 세 줄 — 다시 돌려도 줄이 늘지 않습니다."""
+    import json
+
+    from app.nn_search import evaluate, winner_rows
+    from app.nn_selection import SEARCH_WINNER_KEY
+
+    # 구간 경계(TRAIN_END · VAL_END)가 UTC 라 여기서도 UTC 로, 세 구간에 다 걸치게 만듭니다
+    start = datetime(2023, 10, 1, tzinfo=timezone.utc)
+    walk = _walk_all(_make_synthetic_universe(n_days=500, start=start))
+    scores = [{t: float(i) for i, t in enumerate(sorted(day))} for day in walk.norm_features]
+    winner = evaluate("NN 시드앙상블", walk, scores, cost=0.001, members=("a|s1", "a|s2"))
+
+    rows = winner_rows(winner, cost=0.001, configs_tried=87, candidates_compared=12)
+
+    assert [(r[0], r[1], r[3]) for r in rows] == [
+        ("neural_net", SEARCH_WINNER_KEY, "is"),
+        ("neural_net", SEARCH_WINNER_KEY, "val"),
+        ("neural_net", SEARCH_WINNER_KEY, "oos"),
+    ]
+    assert all(len(r) == 22 for r in rows)  # upsert_experiment_rows 의 자리표시자 개수
+    meta = json.loads(rows[0][18])
+    assert meta["members"] == ["a|s1", "a|s2"]
+    assert meta["configs_tried"] == 87
+    assert meta["candidates_compared"] == 12
+
+
+# ──────────────────────────────────────────────────────────────
+# 탐색 승자 저장 · 복원 — 수치만 남기고 모델을 버리면 다시 쓸 수 없습니다
+# ──────────────────────────────────────────────────────────────
+
+
+def test_config_name_round_trips_and_rejects_non_nn_names() -> None:
+    from app.nn_search import config_name, parse_config_name
+
+    config = ("gru", "extended", 64, 0.4, 0.001, 0.0003, 42)
+    assert parse_config_name(config_name(*config)) == config
+    for name in ("random_forest", "vol_surge_edge", "gru|전부|h64|d0.4|wd0.001|lr0.001|s42"):
+        with pytest.raises(ValueError):
+            parse_config_name(name)
+
+
+def test_saved_winner_scores_the_same_after_reload(tmp_path) -> None:
+    """저장한 승자를 다시 불러와 채점하면 학습 직후와 똑같은 점수가 나와야 합니다."""
+    import json
+    import stat
+
+    from app import nn_search
+    from app.nn_selection import feature_dim
+
+    start = datetime(2023, 10, 1, tzinfo=timezone.utc)
+    universe = _make_synthetic_universe(n_days=500, start=start)
+    walk = _walk_all(universe, "extended")
+    ds = nn_search.build_dataset(walk, "B", feature_dim("extended"))
+    members = [nn_search.run_config(ds, "extended", "gru", 8, 0.2, 1e-3, 1e-3, seed, 0.001) for seed in (1, 2)]
+    winner = nn_search.evaluate(
+        "NN 시드앙상블",
+        walk,
+        nn_search.rank_average([m.scores for m in members]),
+        0.001,
+        tuple(m.name for m in members),
+        tuple(t for m in members for t in m.trained),
+    )
+
+    model_dir = nn_search.save_winner_models(winner, tmp_path / "winner")
+
+    files = sorted(p.name for p in model_dir.iterdir())
+    assert files == ["manifest.json", "member_0.pt", "member_1.pt"]
+    for path in model_dir.iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    manifest = json.loads((model_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert [m["seed"] for m in manifest["nn_members"]] == [1, 2]
+    assert manifest["other_components"] == []
+
+    _, reloaded = nn_search.score_with_winner(universe, model_dir)
+    assert len(reloaded) == len(winner.scores)
+    for got, want in zip(reloaded, winner.scores):
+        assert got == pytest.approx(want)
+
+    # DB 줄에도 파라미터 수와 구성원별 학습 기록이 실립니다
+    rows = nn_search.winner_rows(winner, 0.001, configs_tried=2, candidates_compared=1)
+    assert rows[0][19] == sum(t.param_count for t in winner.trained) > 0
+    details = json.loads(rows[0][18])["member_details"]
+    assert [d["seed"] for d in details] == [1, 2]
+    assert all(d["epochs"] == len(d["loss_curve"]) >= d["best_epoch"] >= 1 for d in details)
+
+
+def test_load_winner_models_without_saved_files_raises(tmp_path) -> None:
+    from app.nn_search import load_winner_models
+
+    with pytest.raises(FileNotFoundError):
+        load_winner_models(tmp_path / "없음")

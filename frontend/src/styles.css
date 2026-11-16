@@ -13,6 +13,7 @@
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
+  --series-4: #b5568f;
   --good: #0f9d58;
   --good-soft: rgba(15, 157, 88, 0.1);
   --critical: #d0383b;
@@ -44,6 +45,7 @@
     --series-1: #5b9bef;
     --series-2: #f08458;
     --series-3: #39c590;
+    --series-4: #dd86b6;
     --good: #35c27a;
     --good-soft: rgba(53, 194, 122, 0.14);
     --critical: #f0595c;
@@ -72,6 +74,7 @@
   --series-1: #5b9bef;
   --series-2: #f08458;
   --series-3: #39c590;
+  --series-4: #dd86b6;
   --good: #35c27a;
   --good-soft: rgba(53, 194, 122, 0.14);
   --critical: #f0595c;

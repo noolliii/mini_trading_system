@@ -38,6 +38,7 @@ from .schemas import (
     MlResult,
     NnArchResult,
     PeriodSummary,
+    SearchWinner,
     SignupIn,
     Stock,
     StockIn,
@@ -1397,13 +1398,33 @@ async def backtest_nn_latest(user: CurrentUserDep) -> ComparisonReport:
 
     rule_based_key = next((mk for (gen, mk) in grouped if gen == "rule_based"), None)
     traditional_ml_key = next((mk for (gen, mk) in grouped if gen == "traditional_ml"), None)
-    nn_keys = [mk for (gen, mk) in grouped if gen == "neural_net"]
+    # 탐색 승자는 "5종 중 대표" 선정에 끼지 않고 별도 항목으로 나갑니다
+    winner_key = nn_selection.SEARCH_WINNER_KEY
+    nn_keys = [mk for (gen, mk) in grouped if gen == "neural_net" and mk != winner_key]
     if rule_based_key is None or traditional_ml_key is None or not nn_keys:
         raise HTTPException(status_code=404, detail={"code": "model_not_trained", "message": "아직 Week 10 비교를 실행하지 않았습니다"})
 
     best_nn_key = max(nn_keys, key=lambda mk: grouped[("neural_net", mk)]["val"]["sharpe"])
 
+    search_winner: SearchWinner | None = None
+    winner_periods = grouped.get(("neural_net", winner_key))
+    if winner_periods is not None and {"is", "val", "oos"} <= set(winner_periods):
+        meta = json.loads(winner_periods["oos"]["hyperparams"] or "{}")
+        search_winner = SearchWinner(
+            **generation_result("neural_net", winner_key).model_dump(by_alias=True),
+            members=meta.get("members", []),
+            configs_tried=meta.get("configs_tried", 0),
+            candidates_compared=meta.get("candidates_compared", 0),
+            param_count=winner_periods["oos"]["param_count"],
+            # epoch 별 전체 곡선은 DB 에만 두고, 화면에는 구성원당 요약 한 줄만 내려보냅니다
+            member_details=[
+                {k: v for k, v in detail.items() if k != "loss_curve"}
+                for detail in meta.get("member_details", [])
+            ],
+        )
+
     return ComparisonReport(
+        search_winner=search_winner,
         rule_based=generation_result("rule_based", rule_based_key),
         traditional_ml=generation_result("traditional_ml", traditional_ml_key),
         neural_net_best=GenerationResult(

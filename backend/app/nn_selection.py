@@ -124,10 +124,73 @@ class _WalkData:
     universe_returns: list[float]  # 그날 유니버스 평균 밤수익률
 
 
-def _walk_all(universe: dict[str, list[Candle]]) -> _WalkData:
+FEATURE_SETS: tuple[str, ...] = ("base", "extended")
+
+# 확장 세트 = 기본 8개 + 룰베이스 8대 전략 점수 + 원시 캔들 변화 3개.
+# 룰베이스가 보는 정보(거래량폭발·야간샤프 등)를 신경망도 직접 보게 합니다.
+EXTENDED_FEATURE_NAMES: tuple[str, ...] = (
+    *ml_selection.FEATURE_NAMES,
+    *(f"rule_{s}" for s in selection.STRATEGIES),
+    "gap",
+    "cc_return",
+    "range",
+)
+
+
+def feature_dim(feature_set: str) -> int:
+    return len(EXTENDED_FEATURE_NAMES) if feature_set == "extended" else F_DIM
+
+
+def _extended_raw_features(
+    universe: dict[str, list[Candle]], all_dates: list[datetime]
+) -> list[dict[str, list[float]]]:
+    """날짜별 확장 원시 피처(룰베이스 점수 8개 + 갭 · 종가수익률 · 당일 변동폭).
+
+    룰베이스 점수는 selection._score_all_days 가 그날 종가까지의 정보로만 매긴
+    값을 그대로 씁니다. 필터에 걸려 점수가 없는 종목은 -inf 로 두어, 횡단면
+    순위에서 공동 최하위가 되게 합니다.
+    """
+    rule_scores: list[list[dict[str, float]]] = []
+    for strategy in selection.STRATEGIES:
+        _, sorted_candidates, _, _ = selection._score_all_days(universe, strategy)
+        rule_scores.append([dict(day) for day in sorted_candidates])
+
+    by_ticker = {t: sorted(cs, key=lambda c: c.time) for t, cs in universe.items() if cs}
+    index_of = {t: {c.time: i for i, c in enumerate(cs)} for t, cs in by_ticker.items()}
+
+    out: list[dict[str, list[float]]] = []
+    for i, t in enumerate(all_dates[:-1]):
+        day: dict[str, list[float]] = {}
+        for ticker, candles in by_ticker.items():
+            idx = index_of[ticker].get(t)
+            if idx is None or idx < 1:
+                continue
+            c, prev = candles[idx], candles[idx - 1]
+            if prev.close <= 0 or c.close <= 0:
+                continue
+            day[ticker] = [
+                *(scores[i].get(ticker, float("-inf")) for scores in rule_scores),
+                c.open / prev.close - 1,
+                c.close / prev.close - 1,
+                (c.high - c.low) / c.close,
+            ]
+        out.append(day)
+    return out
+
+
+def _walk_all(universe: dict[str, list[Candle]], feature_set: str = "base") -> _WalkData:
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"알 수 없는 피처 세트입니다: {feature_set}")
     all_dates, features_per_day, realized_per_day = ml_selection._walk(universe)
     if not all_dates:
         return _WalkData([], [], [], [], [], [], [])
+
+    if feature_set == "extended":
+        extended = _extended_raw_features(universe, all_dates)
+        features_per_day = [
+            {t: fv + ext_day[t] for t, fv in day.items() if t in ext_day}
+            for day, ext_day in zip(features_per_day, extended)
+        ]
 
     norm_features: list[dict[str, list[float]]] = []
     seq_features: list[dict[str, list[list[float]]]] = []
@@ -148,7 +211,7 @@ def _walk_all(universe: dict[str, list[Candle]]) -> _WalkData:
             hist = ticker_hist.setdefault(ticker, [])
             hist.append(fv)
             if len(hist) >= SEQ_LEN:
-                seq_today[ticker] = [row[:] for row in hist[-SEQ_LEN:]]
+                seq_today[ticker] = hist[-SEQ_LEN:]
         seq_features.append(seq_today)
 
     return _WalkData(
@@ -228,10 +291,10 @@ def _score_all(
 class MlpScorer(nn.Module):
     """계열 A — 당일 스냅샷 (N, F) 만 봅니다. 시퀀스 입력이 아닙니다."""
 
-    def __init__(self, hidden: int = 32, dropout: float = 0.3) -> None:
+    def __init__(self, hidden: int = 32, dropout: float = 0.3, in_dim: int = F_DIM) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(F_DIM, hidden), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(in_dim, hidden), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(hidden, hidden), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(hidden, 1),
         )
@@ -243,10 +306,10 @@ class MlpScorer(nn.Module):
 class Cnn1dScorer(nn.Module):
     """계열 B — 최근 SEQ_LEN일 (N, L, F) 궤적을 시간축으로 합성곱합니다."""
 
-    def __init__(self, hidden: int = 32, dropout: float = 0.3) -> None:
+    def __init__(self, hidden: int = 32, dropout: float = 0.3, in_dim: int = F_DIM) -> None:
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv1d(F_DIM, hidden, kernel_size=3, padding=1), nn.ReLU(), nn.Dropout(dropout),
+            nn.Conv1d(in_dim, hidden, kernel_size=3, padding=1), nn.ReLU(), nn.Dropout(dropout),
             nn.Conv1d(hidden, hidden, kernel_size=3, padding=1), nn.ReLU(),
         )
         self.pool = nn.AdaptiveAvgPool1d(1)
@@ -262,10 +325,10 @@ class Cnn1dScorer(nn.Module):
 class RecurrentScorer(nn.Module):
     """계열 B — LSTM 또는 GRU 로 (N, L, F) 궤적의 마지막 은닉상태를 씁니다."""
 
-    def __init__(self, cell: str, hidden: int = 32, dropout: float = 0.3) -> None:
+    def __init__(self, cell: str, hidden: int = 32, dropout: float = 0.3, in_dim: int = F_DIM) -> None:
         super().__init__()
         rnn_cls = nn.LSTM if cell == "lstm" else nn.GRU
-        self.rnn = rnn_cls(input_size=F_DIM, hidden_size=hidden, batch_first=True)
+        self.rnn = rnn_cls(input_size=in_dim, hidden_size=hidden, batch_first=True)
         self.dropout = nn.Dropout(dropout)
         self.head = nn.Linear(hidden, 1)
 
@@ -279,10 +342,16 @@ class TransformerScorer(nn.Module):
     """계열 B — Self-Attention 으로 (N, L, F) 궤적 전체를 한 번에 봅니다."""
 
     def __init__(
-        self, seq_len: int = SEQ_LEN, hidden: int = 32, dropout: float = 0.3, nhead: int = 2, layers: int = 2
+        self,
+        seq_len: int = SEQ_LEN,
+        hidden: int = 32,
+        dropout: float = 0.3,
+        nhead: int = 2,
+        layers: int = 2,
+        in_dim: int = F_DIM,
     ) -> None:
         super().__init__()
-        self.proj = nn.Linear(F_DIM, hidden)
+        self.proj = nn.Linear(in_dim, hidden)
         self.pos = nn.Parameter(torch.zeros(seq_len, hidden))
         nn.init.normal_(self.pos, std=0.02)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -335,11 +404,11 @@ def _train_model(
     max_epochs: int = 40,
     patience: int = 5,
 ) -> tuple[nn.Module, list[dict], int]:
-    Xt = torch.tensor(X_train, dtype=torch.float32)
-    yt = torch.tensor(y_train, dtype=torch.float32)
+    Xt = torch.as_tensor(X_train, dtype=torch.float32)
+    yt = torch.as_tensor(y_train, dtype=torch.float32)
     has_val = len(X_val) > 0
-    Xv = torch.tensor(X_val, dtype=torch.float32) if has_val else None
-    yv = torch.tensor(y_val, dtype=torch.float32) if has_val else None
+    Xv = torch.as_tensor(X_val, dtype=torch.float32) if has_val else None
+    yv = torch.as_tensor(y_val, dtype=torch.float32) if has_val else None
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.HuberLoss()
@@ -625,75 +694,52 @@ def _points_json(points: list[selection.Top5Point]) -> str:
     return json.dumps([{"time": p.time.isoformat(), "cum_portfolio": p.cum_portfolio, "cum_universe": p.cum_universe} for p in points])
 
 
-async def save_experiments(conn: asyncpg.Connection, report: ComparisonReport, cost: float) -> None:
-    rows: list[tuple] = []
+# 탐색 도구(nn_search.py)가 고른 최종 승자는 신경망 5종과 같은 표에 이 키로 따로 남깁니다 —
+# GET /latest 가 "5종 중 대표" 선정에서는 빼고 별도 항목으로 돌려줍니다
+SEARCH_WINNER_KEY = "search_winner"
 
-    def add(
-        generation: str,
-        model_key: str,
-        model_label: str,
-        k: int,
-        period: str,
-        summary: selection.Top5Summary,
-        points: list[selection.Top5Point],
-        hyperparams: dict | None = None,
-        param_count: int | None = None,
-        loss_curve: list[dict] | None = None,
-    ) -> None:
-        rows.append(
-            (
-                generation,
-                model_key,
-                model_label,
-                period,
-                k,
-                cost,
-                summary.final_portfolio,
-                summary.final_universe,
-                summary.win_rate,
-                summary.trading_nights,
-                summary.mdd,
-                summary.sharpe,
-                summary.calmar,
-                summary.cagr,
-                summary.universe_mdd,
-                summary.universe_sharpe,
-                summary.universe_calmar,
-                summary.universe_cagr,
-                json.dumps(hyperparams) if hyperparams is not None else None,
-                param_count,
-                json.dumps(loss_curve) if loss_curve is not None else None,
-                _points_json(points),
-            )
-        )
 
-    rb = report.rule_based
-    add(rb.generation, rb.model_key, rb.model_label, rb.k, "is", rb.is_summary, rb.is_points)
-    add(rb.generation, rb.model_key, rb.model_label, rb.k, "val", rb.val_summary, rb.val_points)
-    add(rb.generation, rb.model_key, rb.model_label, rb.k, "oos", rb.oos_summary, rb.oos_points)
+def experiment_row(
+    generation: str,
+    model_key: str,
+    model_label: str,
+    k: int,
+    cost: float,
+    period: str,
+    summary: selection.Top5Summary,
+    points: list[selection.Top5Point],
+    hyperparams: dict | None = None,
+    param_count: int | None = None,
+    loss_curve: list[dict] | None = None,
+) -> tuple:
+    """model_experiments 한 줄 — upsert_experiment_rows 의 자리표시자 순서 그대로입니다."""
+    return (
+        generation,
+        model_key,
+        model_label,
+        period,
+        k,
+        cost,
+        summary.final_portfolio,
+        summary.final_universe,
+        summary.win_rate,
+        summary.trading_nights,
+        summary.mdd,
+        summary.sharpe,
+        summary.calmar,
+        summary.cagr,
+        summary.universe_mdd,
+        summary.universe_sharpe,
+        summary.universe_calmar,
+        summary.universe_cagr,
+        json.dumps(hyperparams, ensure_ascii=False) if hyperparams is not None else None,
+        param_count,
+        json.dumps(loss_curve) if loss_curve is not None else None,
+        _points_json(points),
+    )
 
-    tm = report.traditional_ml
-    add(tm.generation, tm.model_key, tm.model_label, tm.k, "is", tm.is_summary, tm.is_points)
-    add(tm.generation, tm.model_key, tm.model_label, tm.k, "val", tm.val_summary, tm.val_points)
-    add(tm.generation, tm.model_key, tm.model_label, tm.k, "oos", tm.oos_summary, tm.oos_points)
 
-    for model_key, nn_result in report.neural_net_all.items():
-        add(
-            "neural_net", model_key, nn_result.model_label, nn_result.k, "is",
-            nn_result.is_summary, nn_result.is_points,
-            hyperparams=nn_result.hyperparams, param_count=nn_result.param_count, loss_curve=nn_result.loss_curve,
-        )
-        add(
-            "neural_net", model_key, nn_result.model_label, nn_result.k, "val",
-            nn_result.val_summary, nn_result.val_points,
-            hyperparams=nn_result.hyperparams, param_count=nn_result.param_count, loss_curve=nn_result.loss_curve,
-        )
-        add(
-            "neural_net", model_key, nn_result.model_label, nn_result.k, "oos",
-            nn_result.oos_summary, nn_result.oos_points,
-            hyperparams=nn_result.hyperparams, param_count=nn_result.param_count, loss_curve=nn_result.loss_curve,
-        )
-
+async def upsert_experiment_rows(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     async with conn.transaction():
         # 트랜잭션 하나로 묶어 모든 줄이 같은 run_at(now())을 공유하게 합니다 —
         # GET /latest 가 generation 별로 "가장 최근 run_at" 하나만 골라야 하는데,
@@ -722,3 +768,36 @@ async def save_experiments(conn: asyncpg.Connection, report: ComparisonReport, c
             """,
             rows,
         )
+
+
+async def save_experiments(conn: asyncpg.Connection, report: ComparisonReport, cost: float) -> None:
+    rows: list[tuple] = []
+
+    for choice in (report.rule_based, report.traditional_ml):
+        for period, summary, points in (
+            ("is", choice.is_summary, choice.is_points),
+            ("val", choice.val_summary, choice.val_points),
+            ("oos", choice.oos_summary, choice.oos_points),
+        ):
+            rows.append(
+                experiment_row(
+                    choice.generation, choice.model_key, choice.model_label, choice.k, cost, period, summary, points
+                )
+            )
+
+    for model_key, nn_result in report.neural_net_all.items():
+        for period, summary, points in (
+            ("is", nn_result.is_summary, nn_result.is_points),
+            ("val", nn_result.val_summary, nn_result.val_points),
+            ("oos", nn_result.oos_summary, nn_result.oos_points),
+        ):
+            rows.append(
+                experiment_row(
+                    "neural_net", model_key, nn_result.model_label, nn_result.k, cost, period, summary, points,
+                    hyperparams=nn_result.hyperparams,
+                    param_count=nn_result.param_count,
+                    loss_curve=nn_result.loss_curve,
+                )
+            )
+
+    await upsert_experiment_rows(conn, rows)

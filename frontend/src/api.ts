@@ -139,6 +139,26 @@ export type ComparisonReport = {
   traditional_ml: GenerationResult
   neural_net_best: GenerationResult
   neural_net_all: NnArchResult[]
+  // 탐색 도구(nn_search)를 돌린 적이 없으면 null
+  search_winner: SearchWinner | null
+}
+// 여러 설정·앙상블 중 Val 샤프로 고른 최종 모델 하나 — 몇 개를 시험했는지 함께 옵니다
+export type SearchWinner = GenerationResult & {
+  members: string[]
+  configs_tried: number
+  candidates_compared: number
+  param_count: number | null
+  member_details: SearchWinnerMember[]
+}
+// 앙상블 구성원 하나 — train_loss · val_loss 는 가중치를 고른 epoch(best_epoch)의 값
+export type SearchWinnerMember = {
+  name: string
+  seed: number
+  param_count: number
+  best_epoch: number
+  epochs: number
+  train_loss: number | null
+  val_loss: number | null
 }
 
 export type Me = { id: number; username: string; role: string; permissions: string[] }

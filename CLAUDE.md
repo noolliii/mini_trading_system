@@ -55,6 +55,12 @@ backend/app/
                    (Train 2020~2023 IS · Val 2024 얼리스토핑 · OOS 2025~2026 표본밖)로
                    학습하고, 룰베이스 최고·전통ML 최고(Train 전용 재학습)와 같은
                    Top-5·같은 비용으로 비교해 model_experiments 에 저장
+  nn_search.py  샤프 최고 모델 탐색(1회성 CLI 도구, API 없음) — `python -m app.nn_search`.
+                확장 피처(19개) → 하이퍼파라미터 격자 → 시드·하이브리드 앙상블. 선택은
+                Val 샤프로만, OOS 는 최종 승자에게만 한 번 계산. 승자 하나만
+                model_experiments 에 model_key='search_winner' 로 저장(화면의 「탐색 최고」)하고
+                가중치는 /tmp/nn-models/search_winner 에 남김(0600). `--winner-only` 는 전체
+                탐색 없이 승자만 재학습·저장, score_with_winner 는 재학습 없이 채점
 frontend/src/
   App.tsx      로그인 껍데기와 탭
   Login.tsx    로그인 화면
