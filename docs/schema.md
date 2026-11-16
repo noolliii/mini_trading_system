@@ -21,6 +21,8 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 | `users` | 로그인 계정 | `id` | — |
 | `accounts` | 증권 계좌 | `account_no` | `user_id` → `users` CASCADE |
 | `sessions` | 로그인 세션 | `session_id` | `user_id` → `users` CASCADE |
+| `index_members` | 지수(코스피100) 시점별 편입 이력 | `id` | `ticker` → `stocks` CASCADE |
+| `model_experiments` | Week 10 — 룰베이스/전통ML/신경망 Train(IS)/Val/OOS 비교 결과 | `id` | — |
 
 ## stocks
 
@@ -126,6 +128,26 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 
 - PK: `session_id` · FK: `user_id` → `users(id)` **ON DELETE CASCADE**
 - 인덱스: `sessions_expires_idx` (`expires_at`) — 만료된 줄을 치울 때 씁니다
+
+## model_experiments (Week 10)
+
+| 칼럼 | 자료형 | NULL | 기본값 |
+| --- | --- | --- | --- |
+| `id` | bigint | NO | `nextval(...)` |
+| `run_at` | timestamptz | NO | `now()` |
+| `generation` | text | NO | — |
+| `model_key` / `model_label` | text | NO | — |
+| `period` | text | NO | — |
+| `k` / `cost` | integer / double precision | NO | — |
+| `final_portfolio` ~ `universe_cagr` | double precision | NO | — (selection.Top5Summary 와 1:1) |
+| `hyperparams` / `loss_curve` / `points` | jsonb | YES / YES / NO | — |
+| `param_count` | integer | YES | — |
+
+- PK: `id` · UNIQUE: (`generation`, `model_key`, `period`) — 같은 조합으로 재학습해도 줄이 안 늘어나고 덮어씁니다
+- CHECK: `generation IN ('rule_based','traditional_ml','neural_net')`, `period IN ('is','val','oos')`
+- `hyperparams`·`param_count`·`loss_curve` 는 신경망(`neural_net`)만 채웁니다
+- `points` 는 그 구간의 `[{time, cum_portfolio, cum_universe}, ...]` — 화면의 OOS 누적수익률 차트가 씁니다
+- 저장: `POST /api/backtest/nn/train-is`(admin) · 조회: `GET /api/backtest/nn/latest`(전원)
 
 ## 눈으로 확인한 것
 

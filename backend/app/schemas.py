@@ -220,6 +220,60 @@ class MlLeaderboard(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
+# Week 10 — 뉴럴 네트워크: Train(IS) vs Val vs Out-of-Sample 3단 비교
+# ──────────────────────────────────────────────────────────────
+
+
+class PeriodSummary(BaseModel):
+    period: str  # "is" | "val" | "oos"
+    summary: Top5Summary
+    points: list[Top5Point]
+
+
+class NnArchResult(BaseModel):
+    """신경망 아키텍처 하나의 Train/Val/OOS 결과. 5개(MLP·1D-CNN·LSTM·GRU·Transformer)
+    전부를 한 화면에서 비교합니다 — model_label 로 구분합니다.
+    """
+
+    model_key: str
+    model_label: str
+    family: str  # "A"(당일 스냅샷 2D) | "B"(최근 20일 시퀀스 3D)
+    param_count: int
+    hyperparams: dict
+    loss_curve: list[dict]
+    is_: PeriodSummary = Field(alias="is")
+    val: PeriodSummary
+    oos: PeriodSummary
+
+    model_config = {"populate_by_name": True}
+
+
+class GenerationResult(BaseModel):
+    """한 세대(룰베이스 최고 · 전통ML 최고 · 신경망 최고)의 Train/Val/OOS 결과."""
+
+    generation: str  # "rule_based" | "traditional_ml" | "neural_net"
+    model_key: str
+    model_label: str
+    k: int
+    is_: PeriodSummary = Field(alias="is")
+    val: PeriodSummary
+    oos: PeriodSummary
+
+    model_config = {"populate_by_name": True}
+
+
+class ComparisonReport(BaseModel):
+    """룰베이스 최고 vs 전통ML 최고 vs 신경망(5종) — 같은 Train(IS)/Val/OOS 구간·
+    같은 Top-5·같은 비용으로 비교한 Week 10 결과입니다.
+    """
+
+    rule_based: GenerationResult
+    traditional_ml: GenerationResult
+    neural_net_best: GenerationResult
+    neural_net_all: list[NnArchResult]
+
+
+# ──────────────────────────────────────────────────────────────
 # 로그인 · 권한
 # ──────────────────────────────────────────────────────────────
 

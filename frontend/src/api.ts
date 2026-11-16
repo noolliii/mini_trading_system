@@ -109,6 +109,38 @@ export type MlLeaderboardRow = {
 }
 export type MlLeaderboard = { rows: MlLeaderboardRow[] }
 
+// ── Week 10 — 신경망 Train(IS) vs Val vs Out-of-Sample 3단 비교 ───────
+// 서버 nn_selection.NN_MODEL_REGISTRY 의 키와 똑같이 맞춥니다
+export type NnModelKey = 'mlp' | 'cnn1d' | 'lstm' | 'gru' | 'transformer'
+export type PeriodKey = 'is' | 'val' | 'oos'
+export type PeriodSummary = { period: PeriodKey; summary: Top5Summary; points: Top5Point[] }
+export type NnArchResult = {
+  model_key: NnModelKey
+  model_label: string
+  family: 'A' | 'B' // A: 당일 스냅샷 · B: 최근 20일 시퀀스
+  param_count: number
+  hyperparams: Record<string, number | string>
+  loss_curve: { epoch: number; train_loss: number; val_loss: number }[]
+  is: PeriodSummary
+  val: PeriodSummary
+  oos: PeriodSummary
+}
+export type GenerationResult = {
+  generation: 'rule_based' | 'traditional_ml' | 'neural_net'
+  model_key: string
+  model_label: string
+  k: number
+  is: PeriodSummary
+  val: PeriodSummary
+  oos: PeriodSummary
+}
+export type ComparisonReport = {
+  rule_based: GenerationResult
+  traditional_ml: GenerationResult
+  neural_net_best: GenerationResult
+  neural_net_all: NnArchResult[]
+}
+
 export type Me = { id: number; username: string; role: string; permissions: string[] }
 export type LoginResult = { username: string; role: string; expires_at: string }
 export type User = {
@@ -356,3 +388,14 @@ export const trainAllMlModels = (
       (range?.end ? `&end=${range.end}` : ''),
     { method: 'POST' },
   )
+
+// ── Week 10 — 신경망 IS/Val/OOS 비교 ────────────────────
+// Train(IS)/Val/OOS 날짜 경계는 전원 통일 실험 규격이라 서버 고정값을 씁니다(쿼리로 못 바꿉니다)
+export const getNnLatest = () => request<ComparisonReport>('/api/backtest/nn/latest')
+
+// 룰베이스 최고 · 전통ML 최고 · 신경망 5종을 전부 재학습·재비교 — admin 만.
+// CPU 로 몇 분 걸릴 수 있습니다
+export const trainNnComparison = (days: number, cost: number) =>
+  request<ComparisonReport>(`/api/backtest/nn/train-is?days=${days}&cost=${cost}`, {
+    method: 'POST',
+  })

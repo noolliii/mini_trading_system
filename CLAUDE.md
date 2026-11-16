@@ -46,6 +46,15 @@ backend/app/
                샤프지수가 가장 좋은 K(1~20)를 직접 찾아 리더보드에 씁니다
   factors.py   OHLCV 파생 팩터 컬럼(캔들모양 · 수급 · 추세 · 야간관성) — factor_combo 가 씀
   metrics.py   최대낙폭(MDD) · 샤프지수 · 칼마지수 (DB 없는 순수 함수)
+  ml_selection.py  scikit-learn 4종(RandomForest·ExtraTrees·GradientBoosting·Ridge)으로
+                   다음날 밤수익률을 예측 — 규칙 2(구간 분할 없음): 받은 기간 전체로 학습
+  ml_automl.py FLAML 로 RandomForest·ExtraTrees·LightGBM·XGBoost 하이퍼파라미터 자동
+               탐색(1회성 CLI 도구, API 없음) — `python -m app.ml_automl`
+  nn_selection.py  Week 10 — PyTorch 신경망 5종(MLP·1D-CNN·LSTM·GRU·Transformer)으로
+                   다음날 밤수익률(시장중립 초과수익률)을 예측. 날짜 고정 3단 분할
+                   (Train 2020~2023 IS · Val 2024 얼리스토핑 · OOS 2025~2026 표본밖)로
+                   학습하고, 룰베이스 최고·전통ML 최고(Train 전용 재학습)와 같은
+                   Top-5·같은 비용으로 비교해 model_experiments 에 저장
 frontend/src/
   App.tsx      로그인 껍데기와 탭
   Login.tsx    로그인 화면
@@ -58,12 +67,15 @@ frontend/src/
   Universe.tsx 유니버스 — 종목 선택 체크박스 · 낮/밤/단순보유 리더보드
   Top5.tsx     Top-K 전략 — 전략 선택 · 기간(기간선택 또는 시작~종료일) ·
                MDD·샤프·칼마·CAGR 타일 · 최근 선택 종목 · 전략 비교 리더보드(종목
-               수는 전략마다 서버가 찾은 최적 K)
+               수는 전략마다 서버가 찾은 최적 K) · 비ML vs ML 비교 · Week 10
+               룰베이스/전통ML/신경망 Train(IS)/Val/OOS 비교(OOS 누적수익률 차트 포함)
   api.ts       fetch 래퍼. ApiError 가 서버의 실패 코드를 그대로 들고 옵니다
 db/init/
   01_schema.sql  stocks · daily_candles(하이퍼테이블) · trading_days ·
-                 users / accounts / sessions
+                 users / accounts / sessions · index_members(지수 시점별 편입 이력)
   02_seed.sql    종목 마스터 8개와 수업용 계정 (일봉·캘린더·신선도는 KIS·스케줄러가 채웁니다)
+  03_model_experiments.sql  Week 10 — 룰베이스/전통ML/신경망 Train(IS)/Val/OOS 비교
+                            결과(샤프·CAGR·MDD·하이퍼파라미터·손실곡선·누적수익률)
 backend/tests/
   test_permissions.py  user 세션으로 관리자 API → 403. DB 없이 돕니다
   test_kis_cache.py    발급 횟수 · 만료 · 재시작 · 로그 누출
@@ -74,9 +86,12 @@ backend/tests/
   test_access_log.py   계좌번호가 로그에 남지 않는지
   test_backtest.py     낮/밤/단순보유 항등식 확인
   test_universe.py     종목별 거래일이 어긋나도 그날 값 있는 종목끼리만 평균
-  test_selection.py    미래참조 편향 없음 · 8대 전략 필터 · 비용 차감 · best_k_result
+  test_selection.py    미래참조 편향 없음 · 8대 전략 필터 · 비용 차감 · best_k_result ·
+                       summarize_periods(구간 재집계) · aggregate_top_k(K 고정)
   test_metrics.py      MDD 는 고점 기준, 샤프는 변동 없으면 0, 칼마 = 수익/|MDD|
   test_factors.py      파생 팩터 컬럼의 20일 역사 조건
+  test_nn_selection.py  Week 10 — 횡단면 정규화·타깃 미래참조 없음 · 시퀀스 윈도우
+                        역사 조건 · 아키텍처 5종 레지스트리 · 학습 스모크 테스트
   fixtures/daily_response.json  실제로 받은 일봉 응답 한 건
   fixtures/holiday_response.json  실제로 받은 휴장일 응답 (한글날 포함)
 docs/

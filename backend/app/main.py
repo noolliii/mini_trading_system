@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ import asyncpg
 from fastapi import Cookie, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import access_log, auth, backtest, collection, db, kis, ml_selection, scheduler, selection, universe
+from . import access_log, auth, backtest, collection, db, kis, ml_selection, nn_selection, scheduler, selection, universe
 from .auth import CurrentUserDep
 from .schemas import (
     AccountIn,
@@ -24,7 +25,9 @@ from .schemas import (
     CandleSeries,
     CollectionStatus,
     CollectResult,
+    ComparisonReport,
     FeatureImportance,
+    GenerationResult,
     IndexMembersImportResult,
     LoginIn,
     LoginOut,
@@ -33,6 +36,8 @@ from .schemas import (
     MlLeaderboard,
     MlLeaderboardRow,
     MlResult,
+    NnArchResult,
+    PeriodSummary,
     SignupIn,
     Stock,
     StockIn,
@@ -1224,3 +1229,191 @@ async def backtest_ml_leaderboard(
     out = MlLeaderboard(rows=[_to_ml_leaderboard_row(r) for r in results])
     _ml_cache[cache_key] = out
     return out
+
+
+# ──────────────────────────────────────────────────────────────
+# Week 10 — 뉴럴 네트워크: 룰베이스 최고 vs 전통ML 최고 vs 신경망(5종)
+# 같은 Train(IS 2020~2023)/Val(2024)/OOS(2025~2026) 구간·Top-5 고정 비교
+# ──────────────────────────────────────────────────────────────
+
+
+def _to_period_summary(period: str, summary: selection.Top5Summary, points: list[selection.Top5Point]) -> PeriodSummary:
+    return PeriodSummary(
+        period=period,
+        summary=Top5Summary(**vars(summary)),
+        points=[Top5Point(**vars(p)) for p in points],
+    )
+
+
+def _to_generation_result(choice: nn_selection.GenerationChoice) -> GenerationResult:
+    return GenerationResult(
+        generation=choice.generation,
+        model_key=choice.model_key,
+        model_label=choice.model_label,
+        k=choice.k,
+        is_=_to_period_summary("is", choice.is_summary, choice.is_points),
+        val=_to_period_summary("val", choice.val_summary, choice.val_points),
+        oos=_to_period_summary("oos", choice.oos_summary, choice.oos_points),
+    )
+
+
+def _nn_result_to_generation_result(nn_result: nn_selection.NnResult) -> GenerationResult:
+    return GenerationResult(
+        generation="neural_net",
+        model_key=nn_result.model_key,
+        model_label=nn_result.model_label,
+        k=nn_result.k,
+        is_=_to_period_summary("is", nn_result.is_summary, nn_result.is_points),
+        val=_to_period_summary("val", nn_result.val_summary, nn_result.val_points),
+        oos=_to_period_summary("oos", nn_result.oos_summary, nn_result.oos_points),
+    )
+
+
+def _nn_result_to_arch_result(nn_result: nn_selection.NnResult) -> NnArchResult:
+    return NnArchResult(
+        model_key=nn_result.model_key,
+        model_label=nn_result.model_label,
+        family=nn_result.family,
+        param_count=nn_result.param_count,
+        hyperparams=nn_result.hyperparams,
+        loss_curve=nn_result.loss_curve,
+        is_=_to_period_summary("is", nn_result.is_summary, nn_result.is_points),
+        val=_to_period_summary("val", nn_result.val_summary, nn_result.val_points),
+        oos=_to_period_summary("oos", nn_result.oos_summary, nn_result.oos_points),
+    )
+
+
+@app.post("/api/backtest/nn/train-is", response_model=ComparisonReport)
+async def backtest_nn_train_is(
+    user: CurrentUserDep,
+    days: int = Query(3650, ge=30, le=3650),
+    cost: float = Query(nn_selection.DEFAULT_COST, ge=0, le=0.05, description="왕복 거래비용 비율. 기본 0.001 = 10bp"),
+    start: date | None = Query(None, description="데이터 시작일. 비우면 days 만큼 과거부터"),
+    end: date | None = Query(None, description="데이터 종료일. 비우면 지금까지"),
+) -> ComparisonReport:
+    """Week 10 — 룰베이스 최고 · 전통ML 최고 · 신경망 5종(MLP·1D-CNN·LSTM·GRU·Transformer)을
+    같은 Train(IS)/Val/OOS 구간·Top-5 고정·같은 비용으로 비교해 DB(model_experiments)에
+    저장합니다(admin 전용). Train(IS)·Val·OOS 날짜 경계는 nn_selection.TRAIN_END/VAL_END
+    고정값입니다 — 전원 통일 실험 규격이라 쿼리로 바꾸지 않습니다. CPU 로 신경망 5종 +
+    전통ML 4종을 전부 재학습해 몇 분 걸릴 수 있습니다.
+    """
+    auth.require(user, "market:write")
+    _validate_range(start, end)
+
+    async with db.acquire() as conn:
+        by_ticker = await _fetch_universe_candles(conn, days, start, end)
+
+    try:
+        report = await asyncio.to_thread(nn_selection.run_full_comparison, by_ticker, cost=cost)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "insufficient_data", "message": str(e)})
+
+    async with db.acquire() as conn:
+        await nn_selection.save_experiments(conn, report, cost=cost)
+
+    best_nn = report.neural_net_all[report.neural_net_best_key]
+    return ComparisonReport(
+        rule_based=_to_generation_result(report.rule_based),
+        traditional_ml=_to_generation_result(report.traditional_ml),
+        neural_net_best=_nn_result_to_generation_result(best_nn),
+        neural_net_all=[_nn_result_to_arch_result(r) for r in report.neural_net_all.values()],
+    )
+
+
+@app.get("/api/backtest/nn/latest", response_model=ComparisonReport)
+async def backtest_nn_latest(user: CurrentUserDep) -> ComparisonReport:
+    """DB(model_experiments)에 저장된 최신 Week 10 비교 결과를 재계산 없이 돌려줍니다."""
+    auth.require(user, "market:read")
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH latest_single AS (
+                SELECT DISTINCT ON (generation) generation, model_key
+                FROM model_experiments
+                WHERE generation IN ('rule_based', 'traditional_ml')
+                ORDER BY generation, run_at DESC
+            )
+            SELECT e.* FROM model_experiments e
+            JOIN latest_single s ON s.generation = e.generation AND s.model_key = e.model_key
+            UNION ALL
+            SELECT * FROM model_experiments WHERE generation = 'neural_net'
+            """
+        )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail={"code": "model_not_trained", "message": "아직 Week 10 비교를 실행하지 않았습니다"})
+
+    grouped: dict[tuple[str, str], dict[str, asyncpg.Record]] = {}
+    labels: dict[tuple[str, str], str] = {}
+    ks: dict[tuple[str, str], int] = {}
+    for row in rows:
+        key = (row["generation"], row["model_key"])
+        grouped.setdefault(key, {})[row["period"]] = row
+        labels[key] = row["model_label"]
+        ks[key] = row["k"]
+
+    def period_summary(row: asyncpg.Record) -> PeriodSummary:
+        summary = Top5Summary(
+            final_portfolio=row["final_portfolio"], final_universe=row["final_universe"],
+            win_rate=row["win_rate"], trading_nights=row["trading_nights"],
+            mdd=row["mdd"], sharpe=row["sharpe"], calmar=row["calmar"], cagr=row["cagr"],
+            universe_mdd=row["universe_mdd"], universe_sharpe=row["universe_sharpe"],
+            universe_calmar=row["universe_calmar"], universe_cagr=row["universe_cagr"],
+        )
+        points = [
+            Top5Point(time=p["time"], cum_portfolio=p["cum_portfolio"], cum_universe=p["cum_universe"])
+            for p in json.loads(row["points"])
+        ]
+        return PeriodSummary(period=row["period"], summary=summary, points=points)
+
+    def generation_result(generation: str, model_key: str) -> GenerationResult:
+        periods = grouped[(generation, model_key)]
+        return GenerationResult(
+            generation=generation,
+            model_key=model_key,
+            model_label=labels[(generation, model_key)],
+            k=ks[(generation, model_key)],
+            is_=period_summary(periods["is"]),
+            val=period_summary(periods["val"]),
+            oos=period_summary(periods["oos"]),
+        )
+
+    def arch_result(model_key: str) -> NnArchResult:
+        periods = grouped[("neural_net", model_key)]
+        any_row = next(iter(periods.values()))
+        family = nn_selection.NN_MODEL_REGISTRY[model_key].family if model_key in nn_selection.NN_MODEL_REGISTRY else "?"
+        return NnArchResult(
+            model_key=model_key,
+            model_label=labels[("neural_net", model_key)],
+            family=family,
+            param_count=any_row["param_count"] or 0,
+            hyperparams=json.loads(any_row["hyperparams"]) if any_row["hyperparams"] else {},
+            loss_curve=json.loads(any_row["loss_curve"]) if any_row["loss_curve"] else [],
+            is_=period_summary(periods["is"]),
+            val=period_summary(periods["val"]),
+            oos=period_summary(periods["oos"]),
+        )
+
+    rule_based_key = next((mk for (gen, mk) in grouped if gen == "rule_based"), None)
+    traditional_ml_key = next((mk for (gen, mk) in grouped if gen == "traditional_ml"), None)
+    nn_keys = [mk for (gen, mk) in grouped if gen == "neural_net"]
+    if rule_based_key is None or traditional_ml_key is None or not nn_keys:
+        raise HTTPException(status_code=404, detail={"code": "model_not_trained", "message": "아직 Week 10 비교를 실행하지 않았습니다"})
+
+    best_nn_key = max(nn_keys, key=lambda mk: grouped[("neural_net", mk)]["val"]["sharpe"])
+
+    return ComparisonReport(
+        rule_based=generation_result("rule_based", rule_based_key),
+        traditional_ml=generation_result("traditional_ml", traditional_ml_key),
+        neural_net_best=GenerationResult(
+            generation="neural_net",
+            model_key=best_nn_key,
+            model_label=labels[("neural_net", best_nn_key)],
+            k=ks[("neural_net", best_nn_key)],
+            is_=period_summary(grouped[("neural_net", best_nn_key)]["is"]),
+            val=period_summary(grouped[("neural_net", best_nn_key)]["val"]),
+            oos=period_summary(grouped[("neural_net", best_nn_key)]["oos"]),
+        ),
+        neural_net_all=[arch_result(mk) for mk in nn_keys],
+    )

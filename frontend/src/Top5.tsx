@@ -8,11 +8,25 @@ import {
   getBacktestTop5Leaderboard,
   getLatestMlResult,
   getMlLeaderboard,
+  getNnLatest,
   getStocks,
   trainAllMlModels,
   trainMlModel,
+  trainNnComparison,
 } from './api'
-import type { Me, MlLeaderboardRow, MlModelKey, MlResult, Stock, Top5Result, Top5Strategy, Top5Summary } from './api'
+import type {
+  ComparisonReport,
+  GenerationResult,
+  Me,
+  MlLeaderboardRow,
+  MlModelKey,
+  MlResult,
+  PeriodKey,
+  Stock,
+  Top5Result,
+  Top5Strategy,
+  Top5Summary,
+} from './api'
 
 // ml_selection.MODEL_REGISTRY 와 같은 키·순서
 const ML_MODELS: { value: MlModelKey; label: string }[] = [
@@ -109,6 +123,13 @@ export default function Top5({ me, onSessionLost }: Props) {
   // 4종을 다 같이 돌리면 진 모델까지 똑같이 무거운 기간으로 재학습하는 낭비가 생깁니다
   const [selectedModel, setSelectedModel] = useState<MlModelKey>('random_forest')
   const [modelTraining, setModelTraining] = useState(false)
+
+  // Week 10 — 룰베이스 최고 · 전통ML 최고 · 신경망 5종을 Train(IS)/Val/OOS 로 비교.
+  // 날짜 경계는 서버 고정값(2020~2023/2024/2025~2026)이라 여기서 바꾸지 않습니다
+  const [nnReport, setNnReport] = useState<ComparisonReport | null>(null)
+  const [nnStatus, setNnStatus] = useState<string | null>(null)
+  const [nnTraining, setNnTraining] = useState(false)
+  const [nnShowArchitectures, setNnShowArchitectures] = useState(false)
 
   const handle = useCallback(
     (e: unknown) => {
@@ -296,6 +317,71 @@ export default function Top5({ me, onSessionLost }: Props) {
       setModelTraining(false)
     }
   }, [selectedModel, days, costPct, startDate, endDate, handle, loadMlLeaderboard, loadFinalComparison])
+
+  // 저장된 Week 10 비교 결과를 재계산 없이 불러옵니다 — 아직 한 번도 안 돌렸으면 안내만 띄웁니다
+  const loadNn = useCallback(async () => {
+    try {
+      setNnReport(await getNnLatest())
+      setNnStatus(null)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'model_not_trained') {
+        setNnReport(null)
+        setNnStatus('아직 Week 10 비교를 실행하지 않았습니다. admin 이 먼저 "전체 재학습"을 실행해야 합니다.')
+        return
+      }
+      handle(e)
+    }
+  }, [handle])
+
+  useEffect(() => {
+    void loadNn()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 룰베이스 8종 + 전통ML 4종(Train 구간만 재학습) + 신경망 5종을 전부 다시 비교합니다 —
+  // admin 전용, CPU 로 몇 분 걸릴 수 있습니다. 기간은 항상 전체(2020~현재)로 고정합니다
+  const handleTrainNn = useCallback(async () => {
+    setNnTraining(true)
+    try {
+      setNnReport(await trainNnComparison(3650, costPct / 100))
+      setNnStatus(null)
+    } catch (e) {
+      handle(e)
+    } finally {
+      setNnTraining(false)
+    }
+  }, [costPct, handle])
+
+  const nnOosSeries: ChartSeries[] = useMemo(() => {
+    if (!nnReport) return []
+    return [
+      {
+        key: 'rule',
+        name: `룰베이스 최고 (${nnReport.rule_based.model_label})`,
+        points: nnReport.rule_based.oos.points.map((p) => ({ t: p.time, v: p.cum_portfolio })),
+      },
+      {
+        key: 'ml',
+        name: `전통ML 최고 (${nnReport.traditional_ml.model_label})`,
+        points: nnReport.traditional_ml.oos.points.map((p) => ({ t: p.time, v: p.cum_portfolio })),
+      },
+      {
+        key: 'nn',
+        name: `신경망 최고 (${nnReport.neural_net_best.model_label})`,
+        points: nnReport.neural_net_best.oos.points.map((p) => ({ t: p.time, v: p.cum_portfolio })),
+      },
+    ]
+  }, [nnReport])
+
+  const PERIOD_LABELS: Record<PeriodKey, string> = { is: 'Train(IS)', val: 'Val', oos: 'OOS' }
+
+  const nnRows = useMemo(() => {
+    if (!nnReport) return []
+    const generations: GenerationResult[] = [nnReport.rule_based, nnReport.traditional_ml, nnReport.neural_net_best]
+    return (['is', 'val', 'oos'] as const).flatMap((period) =>
+      generations.map((g) => ({ period, generation: g.generation, label: g.model_label, k: g.k, summary: g[period].summary })),
+    )
+  }, [nnReport])
 
   const rankedLeaderboard = useMemo(
     () => (leaderboard ? [...leaderboard].sort((a, b) => b.summary.calmar - a.summary.calmar) : []),
@@ -667,6 +753,117 @@ export default function Top5({ me, onSessionLost }: Props) {
               {row.feature_importances.map((f) => `${f.name} ${(f.importance * 100).toFixed(1)}%`).join(' · ')}
             </div>
           ))}
+        </>
+      )}
+
+      <div className="panel-head" style={{ marginTop: 28 }}>
+        <h3 style={{ margin: 0 }}>Week 10 — 룰베이스 vs 전통ML vs 신경망 (Train(IS) / Val / OOS)</h3>
+        <span className="hint">
+          전원 통일 실험 규격: Train 2020~2023(IS) · Val 2024(얼리스토핑) · OOS 2025~2026 · Top-5 고정 · 왕복비용
+          위 설정값 · 신경망은 MLP·1D-CNN·LSTM·GRU·Transformer 5종을 전부 학습해 Val 샤프 최고를 대표로 씁니다
+        </span>
+      </div>
+
+      {me.role === 'admin' && (
+        <div className="filters" style={{ marginBottom: 12 }}>
+          <button className="primary" onClick={() => void handleTrainNn()} disabled={nnTraining}>
+            {nnTraining ? '신경망 5종 + 전통ML 재학습 중… (몇 분 걸릴 수 있습니다)' : '전체 재학습 (룰베이스 + 전통ML + 신경망 5종)'}
+          </button>
+        </div>
+      )}
+
+      {nnStatus && <div className="hint">{nnStatus}</div>}
+
+      {nnReport && (
+        <>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>구간</th>
+                  <th>방식</th>
+                  <th>종목 수</th>
+                  <th>누적수익률</th>
+                  <th>CAGR</th>
+                  <th>MDD</th>
+                  <th>승률</th>
+                  <th>샤프</th>
+                </tr>
+              </thead>
+              <tbody>
+                {nnRows.map((row, i) => (
+                  <tr key={`${row.period}-${row.generation}`} style={row.period === 'oos' ? { fontWeight: 600 } : undefined}>
+                    {i % 3 === 0 && (
+                      <td rowSpan={3} className="mono">
+                        {PERIOD_LABELS[row.period]}
+                      </td>
+                    )}
+                    <td>
+                      {row.generation === 'rule_based' ? '룰베이스 최고' : row.generation === 'traditional_ml' ? '전통ML 최고' : '신경망 최고'}
+                      {` (${row.label})`}
+                    </td>
+                    <td>{row.k}</td>
+                    <td className="mono">{pct(row.summary.final_portfolio)}</td>
+                    <td className="mono">{pct(row.summary.cagr)}</td>
+                    <td className="mono">{pct(row.summary.mdd)}</td>
+                    <td className="mono">{(row.summary.win_rate * 100).toFixed(1)}%</td>
+                    <td className="mono">{row.summary.sharpe.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="hint" style={{ margin: '8px 0' }}>
+            OOS(표본밖) 구간 누적수익률 — 학습·튜닝에 전혀 관여하지 않은 구간입니다
+          </div>
+          <div className="chart-wrap" style={{ marginBottom: 20 }}>
+            <LineChart series={nnOosSeries} unit="%" />
+          </div>
+
+          <button onClick={() => setNnShowArchitectures((v) => !v)} style={{ marginBottom: 12 }}>
+            {nnShowArchitectures ? '신경망 아키텍처 5종 상세 숨기기' : '신경망 아키텍처 5종 상세 보기'}
+          </button>
+
+          {nnShowArchitectures && (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>아키텍처</th>
+                    <th>계열</th>
+                    <th>파라미터 수</th>
+                    <th>IS 샤프</th>
+                    <th>Val 샤프</th>
+                    <th>OOS 샤프</th>
+                    <th>마지막 epoch loss (train/val)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nnReport.neural_net_all.map((arch) => {
+                    const lastLoss = arch.loss_curve[arch.loss_curve.length - 1]
+                    const isBest = arch.model_key === nnReport.neural_net_best.model_key
+                    return (
+                      <tr key={arch.model_key} style={isBest ? { fontWeight: 600 } : undefined}>
+                        <td>
+                          {arch.model_label}
+                          {isBest ? ' 🏆' : ''}
+                        </td>
+                        <td>{arch.family === 'A' ? '당일 스냅샷(2D)' : '20일 시퀀스(3D)'}</td>
+                        <td>{arch.param_count.toLocaleString()}</td>
+                        <td className="mono">{arch.is.summary.sharpe.toFixed(2)}</td>
+                        <td className="mono">{arch.val.summary.sharpe.toFixed(2)}</td>
+                        <td className="mono">{arch.oos.summary.sharpe.toFixed(2)}</td>
+                        <td className="mono">
+                          {lastLoss ? `${lastLoss.train_loss.toFixed(4)} / ${lastLoss.val_loss.toFixed(4)}` : '-'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </>
       )}
     </section>

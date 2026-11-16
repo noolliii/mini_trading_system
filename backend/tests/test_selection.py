@@ -9,8 +9,11 @@ from datetime import datetime
 
 import pytest
 
+from app import metrics
 from app.schemas import Candle
 from app.selection import (
+    _EMPTY_SUMMARY,
+    _score_all_days,
     _score_factor_combo,
     _score_mean_reversion,
     _score_momentum,
@@ -19,8 +22,13 @@ from app.selection import (
     _score_vol_surge_edge,
     _score_vol_surge_trend,
     _score_volume_surge,
+    NightPick,
+    Top5Point,
+    Top5Result,
+    aggregate_top_k,
     backtest_top_k,
     best_k_result,
+    summarize_periods,
 )
 
 D0, D1, D2, D3 = (
@@ -341,3 +349,90 @@ def test_universe_metrics_are_the_same_across_strategies_for_the_same_period() -
     assert a.summary.universe_mdd == pytest.approx(b.summary.universe_mdd)
     assert a.summary.universe_sharpe == pytest.approx(b.summary.universe_sharpe)
     assert a.summary.universe_calmar == pytest.approx(b.summary.universe_calmar)
+
+
+# ──────────────────────────────────────────────────────────────
+# aggregate_top_k — K 탐색 없이 고정 K 하나만 집계하는 공개 래퍼 (Week 10 IS/OOS 비교용)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_top_k_matches_backtest_top_k_for_a_fixed_k() -> None:
+    all_dates, sorted_candidates, realized_per_day, universe_returns = _score_all_days(
+        UNIVERSE_2DAY, "mean_reversion"
+    )
+    via_wrapper = aggregate_top_k(
+        "mean_reversion", all_dates, sorted_candidates, realized_per_day, universe_returns, k=1, cost=0.0
+    )
+    via_existing = backtest_top_k(UNIVERSE_2DAY, "mean_reversion", k=1, cost=0.0)
+    assert via_wrapper == via_existing
+
+
+# ──────────────────────────────────────────────────────────────
+# summarize_periods — 이미 계산해 둔 결과를 재채점 없이 날짜 구간별로 쪼갭니다
+# (Week 10: Train/Val/OOS 3단 비교가 이 함수로 공정 비교 기준선을 만듭니다)
+# ──────────────────────────────────────────────────────────────
+
+
+def _build_fixed_result(daily_returns: list[float], has_pick: list[bool]) -> Top5Result:
+    dates = [D0, D1, D2, D3][: len(daily_returns)]
+    points: list[Top5Point] = []
+    picks: list[NightPick] = []
+    cum = 1.0
+    for t, r, picked in zip(dates, daily_returns, has_pick):
+        cum *= 1 + r
+        points.append(Top5Point(time=t, cum_portfolio=(cum - 1) * 100, cum_universe=0.0))
+        picks.append(NightPick(time=t, tickers=["A"] if picked else []))
+    return Top5Result(strategy="fixture", points=points, summary=_EMPTY_SUMMARY, picks=picks)
+
+
+def test_summarize_periods_splits_into_independent_segments() -> None:
+    # 4거래일: +2% · -1% · 거래 없음(0%, 픽이 비어 트레이딩나잇에서 빠짐) · +1%
+    result = _build_fixed_result(
+        daily_returns=[0.02, -0.01, 0.0, 0.01],
+        has_pick=[True, True, False, True],
+    )
+
+    (seg0_summary, seg0_points), (seg1_summary, seg1_points) = summarize_periods(result, [D1])
+
+    assert [p.time for p in seg0_points] == [D0, D1]
+    assert [p.time for p in seg1_points] == [D2, D3]
+
+    assert seg0_summary.final_portfolio == pytest.approx(0.98)  # (1.02*0.99-1)*100
+    assert seg0_summary.trading_nights == 2
+    assert seg0_summary.win_rate == pytest.approx(0.5)  # +2%만 승, -1%는 패
+    assert seg0_summary.mdd == pytest.approx(-1.0)
+    assert seg0_summary.sharpe == pytest.approx(metrics.sharpe_ratio([0.02, -0.01]))
+    assert seg0_summary.calmar == pytest.approx(metrics.calmar_ratio(0.98, -1.0))
+    assert seg0_summary.cagr == pytest.approx(metrics.cagr(0.98, 2))
+
+    expected_final_seg1 = ((1 + 0.0) * (1 + 0.01) - 1) * 100
+    assert seg1_summary.final_portfolio == pytest.approx(expected_final_seg1)
+    assert seg1_summary.trading_nights == 1  # 거래 없음(0%)인 날은 빠집니다
+    assert seg1_summary.win_rate == pytest.approx(1.0)
+
+
+def test_summarize_periods_handles_an_empty_segment() -> None:
+    result = _build_fixed_result(daily_returns=[0.01, 0.02], has_pick=[True, True])
+    # 두 거래일 모두 경계보다 한참 이전이라 두 번째 구간엔 날짜가 하나도 없습니다
+    (seg0_summary, seg0_points), (seg1_summary, seg1_points) = summarize_periods(result, [D3])
+
+    assert len(seg0_points) == 2
+    assert seg1_points == []
+    assert seg1_summary == _EMPTY_SUMMARY
+
+
+def test_summarize_periods_three_way_split_covers_every_point_exactly_once() -> None:
+    result = _build_fixed_result(daily_returns=[0.01, -0.02, 0.03, 0.01], has_pick=[True] * 4)
+    segments = summarize_periods(result, [D0, D2])  # (~D0] · (D0~D2] · (D2~)
+
+    assert len(segments) == 3
+    all_points = [p for _, pts in segments for p in pts]
+    assert [p.time for p in all_points] == [D0, D1, D2, D3]  # 겹침도 누락도 없음
+
+
+def test_summarize_periods_does_not_mutate_the_original_result() -> None:
+    """후처리가 원본 result 를 건드리지 않는지 — 같은 result 를 여러 구간 정의로 재사용할 수 있어야 합니다."""
+    result = _build_fixed_result(daily_returns=[0.02, -0.01, 0.0, 0.01], has_pick=[True, True, False, True])
+    original_points = list(result.points)
+    summarize_periods(result, [D1])
+    assert result.points == original_points

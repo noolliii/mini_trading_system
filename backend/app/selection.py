@@ -451,3 +451,112 @@ def best_k_result(
 
     all_dates, sorted_candidates, realized_per_day, universe_returns = _score_all_days(universe, strategy)
     return best_k_from_scores(strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, cost, k_candidates)
+
+
+def aggregate_top_k(
+    strategy: str,
+    all_dates: list[datetime],
+    sorted_candidates: list[list[tuple[str, float]]],
+    realized_per_day: list[dict[str, float]],
+    universe_returns: list[float],
+    k: int,
+    cost: float = 0.0,
+) -> Top5Result:
+    """공개 래퍼 — K 탐색 없이 고정 K 하나로 집계만 합니다.
+
+    best_k_from_scores/best_k_result 는 K_CANDIDATES(1~20)를 전부 시험해 보지만,
+    Week 10 과제처럼 "전원 Top-5 고정"이 실험 규격인 비교에는 K 탐색이 필요 없고
+    오히려 학생마다 다른 K가 섞이면 통합분석이 공정하지 않습니다
+    (nn_selection.py 의 IS/OOS 3세대 비교가 이 함수로 K=5 를 고정해 씁니다).
+    """
+    return _aggregate_top_k(strategy, all_dates, sorted_candidates, realized_per_day, universe_returns, k, cost)
+
+
+def summarize_periods(
+    result: Top5Result, boundaries: list[datetime]
+) -> list[tuple[Top5Summary, list[Top5Point]]]:
+    """result.points 를 boundaries 기준 날짜 구간으로 쪼개, 각 구간을 처음(0%)부터
+    독립적으로 다시 누적한 (Top5Summary, 그 구간의 Top5Point 리스트)를 구간 수만큼 돌려줍니다.
+
+    boundaries 는 오름차순 날짜 목록입니다. boundaries=[B1, B2] 면 구간은
+    (~B1], (B1~B2], (B2~) 셋 — "그 날짜까지는 이전 구간, 그 다음날부터 다음 구간"
+    기준입니다. 이미 계산해 둔 전체기간 백테스트(result)를 재채점 없이 여러
+    구간(Train/Val/OOS 등)으로 쪼개 보는 순수 후처리입니다 — 원래의 점수·선택
+    로직(미래참조 방지가 걸려 있는 부분)은 전혀 다시 타지 않고, 이미 나온
+    누적수익률 시리즈를 일별수익률로 되돌려 구간별로 다시 복리 누적만 합니다.
+    """
+    n_segments = len(boundaries) + 1
+    if not result.points:
+        return [(_EMPTY_SUMMARY, []) for _ in range(n_segments)]
+
+    cum_portfolio_full = [p.cum_portfolio for p in result.points]
+    cum_universe_full = [p.cum_universe for p in result.points]
+    daily_portfolio = metrics.daily_returns_from_cumulative(cum_portfolio_full)
+    daily_universe = metrics.daily_returns_from_cumulative(cum_universe_full)
+
+    def segment_index(t: datetime) -> int:
+        idx = 0
+        for b in boundaries:
+            if t > b:
+                idx += 1
+            else:
+                break
+        return idx
+
+    segments: list[list[int]] = [[] for _ in range(n_segments)]
+    for i, p in enumerate(result.points):
+        segments[segment_index(p.time)].append(i)
+
+    out: list[tuple[Top5Summary, list[Top5Point]]] = []
+    for idxs in segments:
+        if not idxs:
+            out.append((_EMPTY_SUMMARY, []))
+            continue
+
+        seg_points: list[Top5Point] = []
+        cum_p = 1.0
+        cum_u = 1.0
+        for i in idxs:
+            cum_p *= 1 + daily_portfolio[i]
+            cum_u *= 1 + daily_universe[i]
+            seg_points.append(
+                Top5Point(
+                    time=result.points[i].time,
+                    cum_portfolio=(cum_p - 1) * 100,
+                    cum_universe=(cum_u - 1) * 100,
+                )
+            )
+
+        seg_portfolio_series = [sp.cum_portfolio for sp in seg_points]
+        seg_universe_series = [sp.cum_universe for sp in seg_points]
+        mdd = metrics.max_drawdown(seg_portfolio_series)
+        sharpe = metrics.sharpe_ratio([daily_portfolio[i] for i in idxs])
+        universe_mdd = metrics.max_drawdown(seg_universe_series)
+        universe_sharpe = metrics.sharpe_ratio([daily_universe[i] for i in idxs])
+
+        wins = 0
+        trading_nights = 0
+        for i in idxs:
+            pick = result.picks[i]
+            if pick.tickers:
+                trading_nights += 1
+                if daily_portfolio[i] > 0:
+                    wins += 1
+
+        summary = Top5Summary(
+            final_portfolio=seg_points[-1].cum_portfolio,
+            final_universe=seg_points[-1].cum_universe,
+            win_rate=(wins / trading_nights) if trading_nights else 0.0,
+            trading_nights=trading_nights,
+            mdd=mdd,
+            sharpe=sharpe,
+            calmar=metrics.calmar_ratio(seg_points[-1].cum_portfolio, mdd),
+            cagr=metrics.cagr(seg_points[-1].cum_portfolio, len(seg_points)),
+            universe_mdd=universe_mdd,
+            universe_sharpe=universe_sharpe,
+            universe_calmar=metrics.calmar_ratio(seg_points[-1].cum_universe, universe_mdd),
+            universe_cagr=metrics.cagr(seg_points[-1].cum_universe, len(seg_points)),
+        )
+        out.append((summary, seg_points))
+
+    return out
