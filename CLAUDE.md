@@ -62,6 +62,9 @@ backend/app/
                 가중치는 /tmp/nn-models/search_winner 에 남김(0600). `--winner-only` 는 전체
                 탐색 없이 승자만 재학습·저장(`--feature-set` 으로 피처 세트 지정),
                 score_with_winner 는 재학습 없이 채점
+  nn_walkforward.py  방식 B — 시험 연도를 2022→2026 으로 옮기며 폴드마다 룰베이스·전통ML·신경망을
+                처음부터 다시 학습·선택하고 시험 구간만 이어 붙이는 1회성 CLI 도구(API·DB 없음,
+                폴드별 결과를 /tmp/nn-search 에 저장해 이어 돎) — `python -m app.nn_walkforward [--fresh]`
   feature_compare.py  피처 세트(8개·19개)만 바꿔 전통ML 4종·신경망 5종을 같은 입력·타깃으로
                 비교하는 1회성 CLI 도구(API·DB 없음) — `python -m app.feature_compare`
 frontend/src/
@@ -101,6 +104,7 @@ backend/tests/
   test_factors.py      파생 팩터 컬럼의 20일 역사 조건
   test_nn_selection.py  Week 10 — 횡단면 정규화·타깃 미래참조 없음 · 시퀀스 윈도우
                         역사 조건 · 아키텍처 5종 레지스트리 · 학습 스모크 테스트
+  test_nn_walkforward.py  방식 B — 폴드 경계 · 학습 텐서가 경계를 넘지 않는지 · 폴드 이어 붙이기 · 이어 돌기
   fixtures/daily_response.json  실제로 받은 일봉 응답 한 건
   fixtures/holiday_response.json  실제로 받은 휴장일 응답 (한글날 포함)
 docs/
