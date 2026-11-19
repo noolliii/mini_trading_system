@@ -60,7 +60,10 @@ backend/app/
                 Val 샤프로만, OOS 는 최종 승자에게만 한 번 계산. 승자 하나만
                 model_experiments 에 model_key='search_winner' 로 저장(화면의 「탐색 최고」)하고
                 가중치는 /tmp/nn-models/search_winner 에 남김(0600). `--winner-only` 는 전체
-                탐색 없이 승자만 재학습·저장, score_with_winner 는 재학습 없이 채점
+                탐색 없이 승자만 재학습·저장(`--feature-set` 으로 피처 세트 지정),
+                score_with_winner 는 재학습 없이 채점
+  feature_compare.py  피처 세트(8개·19개)만 바꿔 전통ML 4종·신경망 5종을 같은 입력·타깃으로
+                비교하는 1회성 CLI 도구(API·DB 없음) — `python -m app.feature_compare`
 frontend/src/
   App.tsx      로그인 껍데기와 탭
   Login.tsx    로그인 화면

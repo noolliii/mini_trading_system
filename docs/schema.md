@@ -148,6 +148,8 @@ Server `timescaledb` · Username·Password·Database 는 `.env` 의 값.
 - `hyperparams`·`param_count`·`loss_curve` 는 신경망(`neural_net`)만 채웁니다
 - `points` 는 그 구간의 `[{time, cum_portfolio, cum_universe}, ...]` — 화면의 OOS 누적수익률 차트가 씁니다
 - 저장: `POST /api/backtest/nn/train-is`(admin) · 조회: `GET /api/backtest/nn/latest`(전원)
+- 전통ML(`traditional_ml`) 행의 `hyperparams` 에는 학습 입력 정보(`feature_set` · `n_features` · `input` ·
+  `target`)가 들어갑니다. 신경망과 같은 순위 변환 피처·초과수익률 타깃으로 학습했다는 기록입니다.
 - `generation = 'neural_net'`, `model_key = 'search_winner'` 인 세 줄은 탐색 도구
   (`python -m app.nn_search`)가 Val 샤프로 고른 최종 모델 하나입니다. `hyperparams` 에
   `members`(앙상블 구성원) · `configs_tried` · `candidates_compared` · `member_details`

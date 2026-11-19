@@ -51,10 +51,19 @@ DEFAULT_COST = 0.001  # 왕복 10bp
 
 F_DIM = 8  # factors.py 파생 피처 개수 (ml_selection.FEATURE_NAMES 와 동일)
 
+# 3세대 비교(전통ML · 신경망)가 쓰는 입력 피처 세트. 두 세대가 같은 입력을 써야 "구조 덕인가
+# 피처 덕인가"가 섞이지 않습니다. 기본 8개로 돌린 비교는 feature_compare.py 가 따로 보여줍니다.
+DEFAULT_FEATURE_SET = "extended"
+
 NN_MODEL_DIR = Path("/tmp/nn-models")
 ML_COMPARE_MODEL_DIR = Path("/tmp/ml-models-is")  # 운영용 /tmp/ml-models 와 분리된 비교 전용 경로
 
 _SEED = 42
+
+# HuberLoss 의 delta. 타깃(초과수익률)의 99% 가 ±0.041 안이고 최대도 0.30 이라, 기본값
+# 1.0 에서는 "선형 구간"에 들어가는 표본이 하나도 없어 사실상 MSE 였습니다. 하루 ±2% 를
+# 넘는 큰 움직임부터 선형으로 완충하도록 맞춥니다.
+HUBER_DELTA = 0.02
 
 
 def _set_seed(seed: int = _SEED) -> None:
@@ -124,7 +133,13 @@ class _WalkData:
     universe_returns: list[float]  # 그날 유니버스 평균 밤수익률
 
 
-FEATURE_SETS: tuple[str, ...] = ("base", "extended")
+# *_dedup 세트는 REDUNDANT_FEATURE 를 뺀 버전입니다. 예전 factors.upper_shadow_ratio 는
+# (고가-종가)/범위 라 close_pos 와 합이 항상 1 이어서(실제 데이터의 99.89%) 같은 정보를 두 번
+# 넣고 있었습니다. 2026-11-18 에 정의를 (고가-max(시가,종가))/범위 로 바로잡아 기본 8개가 전부
+# 독립이 되었으므로, 평소에는 base · extended 를 씁니다. dedup 세트는 정의 오류 시절의 비교와
+# 이미 저장된 dedup 모델(search_winner_*) 복원을 위해 남깁니다.
+FEATURE_SETS: tuple[str, ...] = ("base", "extended", "base_dedup", "extended_dedup")
+REDUNDANT_FEATURE = "upper_shadow_ratio"
 
 # 확장 세트 = 기본 8개 + 룰베이스 8대 전략 점수 + 원시 캔들 변화 3개.
 # 룰베이스가 보는 정보(거래량폭발·야간샤프 등)를 신경망도 직접 보게 합니다.
@@ -137,8 +152,22 @@ EXTENDED_FEATURE_NAMES: tuple[str, ...] = (
 )
 
 
+def _is_dedup(feature_set: str) -> bool:
+    return feature_set.endswith("_dedup")
+
+
+def feature_names(feature_set: str) -> tuple[str, ...]:
+    """피처 세트의 컬럼 이름(입력 텐서의 마지막 축 순서 그대로)."""
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"알 수 없는 피처 세트입니다: {feature_set}")
+    names = EXTENDED_FEATURE_NAMES if feature_set.startswith("extended") else tuple(ml_selection.FEATURE_NAMES)
+    if _is_dedup(feature_set):
+        names = tuple(n for n in names if n != REDUNDANT_FEATURE)
+    return names
+
+
 def feature_dim(feature_set: str) -> int:
-    return len(EXTENDED_FEATURE_NAMES) if feature_set == "extended" else F_DIM
+    return len(feature_names(feature_set))
 
 
 def _extended_raw_features(
@@ -185,11 +214,18 @@ def _walk_all(universe: dict[str, list[Candle]], feature_set: str = "base") -> _
     if not all_dates:
         return _WalkData([], [], [], [], [], [], [])
 
-    if feature_set == "extended":
+    if feature_set.startswith("extended"):
         extended = _extended_raw_features(universe, all_dates)
         features_per_day = [
             {t: fv + ext_day[t] for t, fv in day.items() if t in ext_day}
             for day, ext_day in zip(features_per_day, extended)
+        ]
+
+    if _is_dedup(feature_set):
+        # 열 위치는 항상 기본 8개 안의 순서(ml_selection.FEATURE_NAMES)입니다
+        drop = list(ml_selection.FEATURE_NAMES).index(REDUNDANT_FEATURE)
+        features_per_day = [
+            {t: fv[:drop] + fv[drop + 1 :] for t, fv in day.items()} for day in features_per_day
         ]
 
     norm_features: list[dict[str, list[float]]] = []
@@ -197,8 +233,9 @@ def _walk_all(universe: dict[str, list[Candle]], feature_set: str = "base") -> _
     excess_targets: list[dict[str, float]] = []
     universe_returns: list[float] = []
     ticker_hist: dict[str, list[list[float]]] = {}
+    last_seen: dict[str, int] = {}  # 종목이 마지막으로 피처를 가졌던 날짜 번호
 
-    for day_features, realized in zip(features_per_day, realized_per_day):
+    for day_i, (day_features, realized) in enumerate(zip(features_per_day, realized_per_day)):
         norm = _cross_sectional_normalize(day_features)
         norm_features.append(norm)
 
@@ -208,6 +245,11 @@ def _walk_all(universe: dict[str, list[Candle]], feature_set: str = "base") -> _
 
         seq_today: dict[str, list[list[float]]] = {}
         for ticker, fv in norm.items():
+            if ticker in last_seen and last_seen[ticker] != day_i - 1:
+                # 거래정지 등으로 하루라도 건너뛰었으면, 연속되지 않은 날들을 한 창으로
+                # 이어 붙이지 않도록 이 종목의 역사를 비우고 SEQ_LEN 일을 다시 쌓습니다
+                ticker_hist[ticker] = []
+            last_seen[ticker] = day_i
             hist = ticker_hist.setdefault(ticker, [])
             hist.append(fv)
             if len(hist) >= SEQ_LEN:
@@ -371,17 +413,22 @@ class TransformerScorer(nn.Module):
 class NnModelSpec:
     label: str
     family: str  # "A"(당일 스냅샷) | "B"(20일 시퀀스)
-    build: Callable[[], nn.Module]
+    build: Callable[[int], nn.Module]  # 입력 피처 수(in_dim)를 받아 모델을 만듭니다
     hyperparams: dict
 
 
 NN_MODEL_REGISTRY: dict[str, NnModelSpec] = {
-    "mlp": NnModelSpec("MLP", "A", lambda: MlpScorer(), {"hidden_dim": 32, "dropout": 0.3}),
-    "cnn1d": NnModelSpec("1D-CNN", "B", lambda: Cnn1dScorer(), {"hidden_dim": 32, "dropout": 0.3}),
-    "lstm": NnModelSpec("LSTM", "B", lambda: RecurrentScorer("lstm"), {"hidden_dim": 32, "dropout": 0.3}),
-    "gru": NnModelSpec("GRU", "B", lambda: RecurrentScorer("gru"), {"hidden_dim": 32, "dropout": 0.3}),
+    "mlp": NnModelSpec("MLP", "A", lambda d: MlpScorer(in_dim=d), {"hidden_dim": 32, "dropout": 0.3}),
+    "cnn1d": NnModelSpec("1D-CNN", "B", lambda d: Cnn1dScorer(in_dim=d), {"hidden_dim": 32, "dropout": 0.3}),
+    "lstm": NnModelSpec(
+        "LSTM", "B", lambda d: RecurrentScorer("lstm", in_dim=d), {"hidden_dim": 32, "dropout": 0.3}
+    ),
+    "gru": NnModelSpec("GRU", "B", lambda d: RecurrentScorer("gru", in_dim=d), {"hidden_dim": 32, "dropout": 0.3}),
     "transformer": NnModelSpec(
-        "Transformer", "B", lambda: TransformerScorer(), {"hidden_dim": 32, "dropout": 0.3, "nhead": 2, "layers": 2}
+        "Transformer",
+        "B",
+        lambda d: TransformerScorer(in_dim=d),
+        {"hidden_dim": 32, "dropout": 0.3, "nhead": 2, "layers": 2},
     ),
 }
 
@@ -403,6 +450,7 @@ def _train_model(
     batch_size: int = 512,
     max_epochs: int = 40,
     patience: int = 5,
+    huber_delta: float = HUBER_DELTA,
 ) -> tuple[nn.Module, list[dict], int]:
     Xt = torch.as_tensor(X_train, dtype=torch.float32)
     yt = torch.as_tensor(y_train, dtype=torch.float32)
@@ -411,7 +459,7 @@ def _train_model(
     yv = torch.as_tensor(y_val, dtype=torch.float32) if has_val else None
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    loss_fn = nn.HuberLoss()
+    loss_fn = nn.HuberLoss(delta=huber_delta)
 
     n = Xt.shape[0]
     best_val = float("inf")
@@ -483,6 +531,7 @@ def train_and_score(
     k: int = FIXED_K,
     max_epochs: int = 40,
     patience: int = 5,
+    feature_set: str = DEFAULT_FEATURE_SET,
 ) -> NnResult:
     """model_key 하나를 Train 구간만으로 학습(Val 은 얼리스토핑에만 사용)하고,
     전체 연속 기간을 채점해 Train(IS)/Val/OOS 3구간 성과를 돌려줍니다.
@@ -491,7 +540,7 @@ def train_and_score(
         raise ValueError(f"알 수 없는 신경망 모델입니다: {model_key}")
     spec = NN_MODEL_REGISTRY[model_key]
 
-    walk = _walk_all(universe)
+    walk = _walk_all(universe, feature_set)
     if not walk.all_dates:
         raise ValueError("학습할 데이터가 부족합니다 — 20일 이상 역사가 쌓인 날이 더 필요합니다")
 
@@ -506,7 +555,7 @@ def train_and_score(
         raise ValueError("학습할 데이터가 부족합니다 — Train 구간에 20일 이상 역사가 쌓인 표본이 더 필요합니다")
 
     _set_seed()
-    model = spec.build()
+    model = spec.build(feature_dim(feature_set))
     model, loss_curve, best_epoch = _train_model(
         model, X_train, y_train, X_val, y_val, max_epochs=max_epochs, patience=patience
     )
@@ -531,6 +580,9 @@ def train_and_score(
         "early_stopped_epoch": best_epoch,
         "seed": _SEED,
         "loss_fn": "HuberLoss",
+        "huber_delta": HUBER_DELTA,
+        "feature_set": feature_set,
+        "n_features": feature_dim(feature_set),
         "optimizer": "AdamW",
     }
 
@@ -561,10 +613,13 @@ def train_all_nn_and_compare(
     cost: float = DEFAULT_COST,
     max_epochs: int = 40,
     patience: int = 5,
+    feature_set: str = DEFAULT_FEATURE_SET,
 ) -> dict[str, NnResult]:
     """NN_MODEL_REGISTRY 5종을 전부 순서대로 학습·채점합니다."""
     return {
-        key: train_and_score(universe, key, cost=cost, max_epochs=max_epochs, patience=patience)
+        key: train_and_score(
+            universe, key, cost=cost, max_epochs=max_epochs, patience=patience, feature_set=feature_set
+        )
         for key in NN_MODEL_REGISTRY
     }
 
@@ -586,6 +641,7 @@ class GenerationChoice:
     val_points: list[selection.Top5Point]
     oos_summary: selection.Top5Summary
     oos_points: list[selection.Top5Point]
+    hyperparams: dict | None = None  # 어떤 입력·타깃으로 학습했는지(전통ML 만 채웁니다)
 
 
 def select_best_rule_based(
@@ -615,6 +671,21 @@ def select_best_rule_based(
     return GenerationChoice("rule_based", strategy, strategy, k, is_s, is_p, val_s, val_p, oos_s, oos_p)
 
 
+def _score_all_sklearn(
+    walk: _WalkData, model: object
+) -> tuple[list[list[tuple[str, float]]], list[dict[str, float]], list[float]]:
+    """scikit-learn 모델로 전체 연속 기간을 채점합니다(_score_all 의 전통ML 판)."""
+    sorted_candidates: list[list[tuple[str, float]]] = []
+    for feats in walk.norm_features:
+        if not feats:
+            sorted_candidates.append([])
+            continue
+        tickers = list(feats.keys())
+        preds = model.predict([feats[t] for t in tickers])  # type: ignore[attr-defined]
+        sorted_candidates.append(sorted(zip(tickers, (float(p) for p in preds)), key=lambda x: x[1], reverse=True))
+    return sorted_candidates, walk.realized_per_day, walk.universe_returns
+
+
 def select_best_traditional_ml(
     universe: dict[str, list[Candle]],
     cost: float = DEFAULT_COST,
@@ -622,40 +693,49 @@ def select_best_traditional_ml(
     val_end: datetime = VAL_END,
     k: int = FIXED_K,
     model_dir: Path = ML_COMPARE_MODEL_DIR,
+    feature_set: str = DEFAULT_FEATURE_SET,
 ) -> GenerationChoice:
-    """전통 ML 4종(Ridge/RF/ExtraTrees/GBM)을 Train 구간만으로 재학습(비교 전용 경로 —
+    """전통 ML 4종(Ridge/RF/ExtraTrees/GBM)을 Train 구간만으로 학습(비교 전용 경로 —
     운영용 /tmp/ml-models 는 건드리지 않습니다)하고, 전체 기간을 채점해 구간을 쪼갠 뒤
     Val 샤프가 가장 좋은 모델을 대표로 선정합니다.
+
+    신경망과 같은 입력(날짜별 종목 간 순위로 바꾼 feature_set 피처)과 같은 타깃(시장중립
+    초과수익률)으로 학습합니다 — 두 세대의 차이가 모델 구조뿐이게 하려는 것입니다.
+    (예전에는 원시 피처 · 원시 밤수익률로 학습해 입력이 달랐습니다.)
     """
-    train_universe = {t: [c for c in cs if c.time <= train_end] for t, cs in universe.items()}
-    train_universe = {t: cs for t, cs in train_universe.items() if cs}
+    walk = _walk_all(universe, feature_set)
+    X_train, y_train = _collect_family_a(walk, upto=train_end)
+    if len(X_train) < 30:
+        raise ValueError("전통 ML 비교 모델을 하나도 학습하지 못했습니다 — Train 구간 표본이 부족합니다")
 
     candidates = []
     for model_key, spec in ml_selection.MODEL_REGISTRY.items():
-        path = model_dir / f"{model_key}.joblib"
-        try:
-            ml_selection.train_and_save(train_universe, model_key=model_key, model_path=path)
-        except ValueError:
-            continue  # 표본 부족 — 이번 비교에서만 건너뜁니다
+        model = spec.build()
+        model.fit(X_train, y_train)
 
-        saved = joblib.load(path)
-        model = saved["model"]
-        all_dates, sorted_candidates, realized_per_day, universe_returns = ml_selection._score_with_model(
-            universe, model
+        path = model_dir / f"{model_key}_{feature_set}.joblib"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(
+            {"model": model, "model_key": model_key, "feature_set": feature_set, "feature_names": feature_names(feature_set)},
+            path,
         )
-        if not all_dates:
-            continue
+        os.chmod(path, 0o600)
+
+        sorted_candidates, realized_per_day, universe_returns = _score_all_sklearn(walk, model)
         result = selection.aggregate_top_k(
-            spec.label, all_dates, sorted_candidates, realized_per_day, universe_returns, k=k, cost=cost
+            spec.label, walk.all_dates, sorted_candidates, realized_per_day, universe_returns, k=k, cost=cost
         )
         (is_s, is_p), (val_s, val_p), (oos_s, oos_p) = selection.summarize_periods(result, [train_end, val_end])
         candidates.append((model_key, spec.label, is_s, is_p, val_s, val_p, oos_s, oos_p))
 
-    if not candidates:
-        raise ValueError("전통 ML 비교 모델을 하나도 학습하지 못했습니다 — Train 구간 표본이 부족합니다")
-
     model_key, label, is_s, is_p, val_s, val_p, oos_s, oos_p = max(candidates, key=lambda c: c[4].sharpe)
-    return GenerationChoice("traditional_ml", model_key, label, k, is_s, is_p, val_s, val_p, oos_s, oos_p)
+    meta = {
+        "feature_set": feature_set,
+        "n_features": feature_dim(feature_set),
+        "input": "날짜별 종목 간 순위(-0.5~+0.5)",
+        "target": "시장중립 초과수익률",
+    }
+    return GenerationChoice("traditional_ml", model_key, label, k, is_s, is_p, val_s, val_p, oos_s, oos_p, meta)
 
 
 @dataclass(frozen=True)
@@ -666,7 +746,11 @@ class ComparisonReport:
     neural_net_best_key: str  # NN_MODEL_REGISTRY 키 — 5개 중 Val 샤프 최고
 
 
-def run_full_comparison(universe: dict[str, list[Candle]], cost: float = DEFAULT_COST) -> ComparisonReport:
+def run_full_comparison(
+    universe: dict[str, list[Candle]],
+    cost: float = DEFAULT_COST,
+    feature_set: str = DEFAULT_FEATURE_SET,
+) -> ComparisonReport:
     """Week 10 공식 규격(날짜·K 고정)으로 3세대(룰베이스/전통ML/신경망)를 전부 비교합니다.
 
     Train(IS)/Val/OOS 날짜 경계는 "전원 통일 실험 규격"이라 인자로 받지 않고
@@ -674,8 +758,8 @@ def run_full_comparison(universe: dict[str, list[Candle]], cost: float = DEFAULT
     교수자의 11주차 통합분석이 공정하지 않습니다.
     """
     rule_based = select_best_rule_based(universe, cost=cost)
-    traditional_ml = select_best_traditional_ml(universe, cost=cost)
-    neural_net_all = train_all_nn_and_compare(universe, cost=cost)
+    traditional_ml = select_best_traditional_ml(universe, cost=cost, feature_set=feature_set)
+    neural_net_all = train_all_nn_and_compare(universe, cost=cost, feature_set=feature_set)
     best_key = max(neural_net_all, key=lambda key: neural_net_all[key].val_summary.sharpe)
     return ComparisonReport(
         rule_based=rule_based,
@@ -781,7 +865,8 @@ async def save_experiments(conn: asyncpg.Connection, report: ComparisonReport, c
         ):
             rows.append(
                 experiment_row(
-                    choice.generation, choice.model_key, choice.model_label, choice.k, cost, period, summary, points
+                    choice.generation, choice.model_key, choice.model_label, choice.k, cost, period, summary, points,
+                    hyperparams=choice.hyperparams,
                 )
             )
 

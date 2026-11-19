@@ -553,7 +553,7 @@ export default function Top5({ me, onSessionLost }: Props) {
                 유니버스 평균
               </div>
               <div className="tile-value">{pct(data.summary.final_universe)}</div>
-              <div className="tile-time">전략과 같은 기간</div>
+              <div className="tile-time">전략과 같은 기간 · 같은 비용 차감</div>
             </div>
             <div className="tile">
               <div className="tile-label">초과수익</div>
@@ -817,7 +817,7 @@ export default function Top5({ me, onSessionLost }: Props) {
         <h3 style={{ margin: 0 }}>Week 10 — 룰베이스 vs 전통ML vs 신경망 (Train(IS) / Val / OOS)</h3>
         <span className="hint">
           전원 통일 실험 규격: Train 2020~2023(IS) · Val 2024(얼리스토핑) · OOS 2025~2026 · Top-5 고정 · 왕복비용
-          위 설정값 · 신경망은 MLP·1D-CNN·LSTM·GRU·Transformer 5종을 전부 학습해 Val 샤프 최고를 대표로 씁니다
+          위 설정값 · 전통ML과 신경망은 같은 입력(확장 피처 19개를 날짜별 종목 간 순위로 변환)·같은 타깃으로 학습하고, 신경망은 MLP·1D-CNN·LSTM·GRU·Transformer 5종을 전부 학습해 Val 샤프 최고를 대표로 씁니다
         </span>
       </div>
 
@@ -873,7 +873,8 @@ export default function Top5({ me, onSessionLost }: Props) {
               「탐색 최고」는 단일 설정 {nnReport.search_winner.configs_tried}개와 최종 후보{' '}
               {nnReport.search_winner.candidates_compared}개 중 Val 샤프가 가장 높은 것을 고른 결과입니다(구성원{' '}
               {nnReport.search_winner.members.length}개의 순위 평균). 많이 시험해 고른 만큼 Val 샤프는 부풀려져
-              있고, OOS 는 이 모델 하나에 대해서만 마지막에 한 번 계산했습니다. 「전체 재학습」으로는 갱신되지
+              있고, OOS 는 이 모델 하나에 대해서만 마지막에 한 번 계산했습니다. 구성원 설정은 그 탐색에서 고른
+              뒤, 학습 코드의 버그를 고쳐 같은 설정으로 다시 학습했습니다. 「전체 재학습」으로는 갱신되지
               않습니다.
             </div>
           )}

@@ -329,3 +329,133 @@ def test_load_winner_models_without_saved_files_raises(tmp_path) -> None:
 
     with pytest.raises(FileNotFoundError):
         load_winner_models(tmp_path / "없음")
+
+
+# ──────────────────────────────────────────────────────────────
+# 점검에서 찾은 세 가지의 수정 — 중복 피처 · 거래일 공백 시퀀스 · Huber delta
+# ──────────────────────────────────────────────────────────────
+
+
+def test_dedup_feature_sets_drop_only_the_redundant_column() -> None:
+    from app.nn_selection import REDUNDANT_FEATURE, feature_dim, feature_names
+
+    assert REDUNDANT_FEATURE not in feature_names("base_dedup")
+    assert REDUNDANT_FEATURE not in feature_names("extended_dedup")
+    assert (feature_dim("base"), feature_dim("base_dedup")) == (8, 7)
+    assert (feature_dim("extended"), feature_dim("extended_dedup")) == (19, 18)
+
+    universe = _make_synthetic_universe(n_tickers=3, n_days=90)
+    for full, dedup in (("base", "base_dedup"), ("extended", "extended_dedup")):
+        walk_full, walk_dedup = _walk_all(universe, full), _walk_all(universe, dedup)
+        drop = list(feature_names(full)).index(REDUNDANT_FEATURE)
+        compared = 0
+        for day_full, day_dedup in zip(walk_full.norm_features, walk_dedup.norm_features):
+            assert day_full.keys() == day_dedup.keys()
+            for ticker, vec in day_full.items():
+                # 열마다 따로 순위를 매기므로, 한 열을 빼도 나머지 열은 한 글자도 안 바뀝니다
+                assert day_dedup[ticker] == vec[:drop] + vec[drop + 1 :]
+                compared += 1
+        assert compared > 0
+
+
+def test_close_pos_and_upper_shadow_sum_to_one_only_for_bullish_candles() -> None:
+    """예전 정의 오류의 흔적 — 양봉에서는 두 값의 합이 1 이지만, 음봉에서는 더 이상 아닙니다.
+
+    (고가-종가)/범위 로 계산하던 시절에는 음봉에서도 합이 1 이라 같은 정보를 두 번 넣었습니다.
+    """
+    from app import factors
+
+    bullish = Candle(time=START, open=100, high=110, low=90, close=104, volume=1)
+    bearish = Candle(time=START, open=104, high=110, low=90, close=100, volume=1)
+
+    assert factors.close_pos(bullish) + factors.upper_shadow_ratio(bullish) == pytest.approx(1.0)
+    assert factors.close_pos(bearish) + factors.upper_shadow_ratio(bearish) != pytest.approx(1.0)
+
+
+def test_sequence_window_restarts_after_a_calendar_gap() -> None:
+    """종목이 며칠 빠지면(거래정지 등) 끊긴 날들을 한 창으로 잇지 않고 SEQ_LEN 일을 다시 쌓습니다."""
+    universe = _make_synthetic_universe(n_tickers=2, n_days=120)
+    universe["T0"] = [c for i, c in enumerate(universe["T0"]) if i not in (50, 51, 52)]
+
+    walk = _walk_all(universe)
+
+    assert "T0" in walk.seq_features[45]  # 공백 전에는 정상적으로 시퀀스가 있습니다
+    assert "T0" in walk.norm_features[53]  # 공백이 끝난 첫날부터 피처는 다시 생기지만
+    for day in range(53, 53 + SEQ_LEN - 1):
+        assert "T0" not in walk.seq_features[day], day  # 새로 쌓는 동안은 시퀀스 후보에서 빠지고
+        assert "T1" in walk.seq_features[day]  # 공백 없는 종목은 영향이 없습니다
+    assert "T0" in walk.seq_features[53 + SEQ_LEN - 1]  # SEQ_LEN 일이 차면 돌아옵니다
+
+
+def test_huber_delta_matches_the_target_scale() -> None:
+    """delta 가 1.0 이면 이 타깃 크기(최대 0.30)에서는 MSE 와 같습니다 — 큰 오차를 실제로 완충해야 합니다."""
+    from torch import nn as torch_nn
+
+    from app.nn_selection import HUBER_DELTA
+
+    import torch
+
+    error = torch.tensor([0.30])
+    zero = torch.tensor([0.0])
+    assert HUBER_DELTA < 0.1
+    assert torch_nn.HuberLoss(delta=HUBER_DELTA)(error, zero).item() < 0.1 * torch_nn.MSELoss()(error, zero).item()
+    assert torch_nn.HuberLoss(delta=1.0)(error, zero).item() == pytest.approx(0.5 * 0.30**2)  # 예전 값은 사실상 MSE
+
+
+def test_feature_compare_runs_every_model_on_the_same_inputs() -> None:
+    """피처 세트만 바꿔 전통ML·신경망을 같은 입력으로 돌리는 통제 실험 도구의 스모크 테스트."""
+    from app.feature_compare import run_compare
+
+    start = datetime(2023, 10, 1, tzinfo=timezone.utc)
+    universe = _make_synthetic_universe(n_tickers=3, n_days=500, start=start)
+
+    rows = run_compare(universe, feature_sets=("base", "extended"), ml_keys=("ridge",), nn_archs=("mlp",))
+
+    assert [(r["feature_set"], r["generation"]) for r in rows] == [
+        ("base", "traditional_ml"),
+        ("base", "neural_net"),
+        ("extended", "traditional_ml"),
+        ("extended", "neural_net"),
+    ]
+    assert [r["n_features"] for r in rows] == [8, 8, 19, 19]
+    for r in rows:
+        for period in ("is", "val", "oos"):
+            assert r[period]["trading_nights"] >= 0
+
+
+def test_registry_models_accept_the_feature_count_they_are_built_with() -> None:
+    import torch
+
+    for key, spec in NN_MODEL_REGISTRY.items():
+        model = spec.build(19)
+        x = torch.zeros(4, 19) if spec.family == "A" else torch.zeros(4, SEQ_LEN, 19)
+        assert model(x).shape == (4,), key
+
+
+def test_three_generation_comparison_defaults_to_the_extended_features() -> None:
+    from app.nn_selection import DEFAULT_FEATURE_SET
+
+    assert DEFAULT_FEATURE_SET == "extended"
+
+    start = datetime(2023, 10, 1, tzinfo=timezone.utc)
+    universe = _make_synthetic_universe(n_tickers=3, n_days=500, start=start)
+    result = train_and_score(universe, "mlp", k=2, max_epochs=2, patience=1)
+    assert result.hyperparams["feature_set"] == "extended"
+    assert result.hyperparams["n_features"] == 19
+
+
+def test_traditional_ml_is_trained_on_the_same_inputs_as_the_neural_nets(tmp_path) -> None:
+    """전통ML 도 신경망과 같은 입력(순위 변환 피처)·같은 타깃으로 학습해야 두 세대의 차이가 구조뿐입니다."""
+    from app.nn_selection import select_best_traditional_ml
+
+    start = datetime(2023, 10, 1, tzinfo=timezone.utc)
+    universe = _make_synthetic_universe(n_tickers=3, n_days=500, start=start)
+
+    choice = select_best_traditional_ml(universe, k=2, model_dir=tmp_path)
+
+    assert choice.generation == "traditional_ml"
+    assert choice.hyperparams is not None
+    assert choice.hyperparams["feature_set"] == "extended"
+    assert choice.hyperparams["n_features"] == 19
+    assert "초과수익률" in choice.hyperparams["target"]
+    assert len(list(tmp_path.glob("*_extended.joblib"))) == 4  # 4종 모두 저장

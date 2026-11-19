@@ -41,6 +41,16 @@ def test_upper_shadow_ratio_is_large_for_a_long_wick() -> None:
     assert upper_shadow_ratio(c) == pytest.approx((120 - 101) / (120 - 99))
 
 
+def test_upper_shadow_ratio_measures_from_the_top_of_the_body_not_the_close() -> None:
+    """윗꼬리는 몸통(시가·종가 중 높은 쪽) 위 부분입니다 — 음봉에서도 몸통을 꼬리로 세면 안 됩니다."""
+    bullish = _candle(100, 110, 95, 104)  # 몸통 위 끝 = 종가 104 → (110-104)/15
+    bearish = _candle(104, 110, 95, 100)  # 몸통 위 끝 = 시가 104 → 같은 모양의 꼬리
+    assert upper_shadow_ratio(bullish) == pytest.approx(6 / 15)
+    assert upper_shadow_ratio(bearish) == pytest.approx(6 / 15)
+    # 옛 정의((고가-종가)/범위)였다면 음봉은 10/15 가 됩니다
+    assert upper_shadow_ratio(bearish) != pytest.approx(10 / 15)
+
+
 def test_turnover_is_close_times_volume() -> None:
     assert turnover(_candle(100, 101, 99, 100, v=1000)) == pytest.approx(100_000)
 

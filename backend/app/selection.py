@@ -353,7 +353,9 @@ def _aggregate_top_k(
 
     for i, t in enumerate(all_dates[1:]):
         cum_portfolio *= 1 + portfolio_returns[i]
-        cum_universe *= 1 + universe_returns[i]
+        # 벤치마크도 "매일 전 종목을 사고파는" 매매라 같은 왕복 비용을 냅니다. 포트폴리오에만
+        # 비용을 빼면 벤치마크가 과대 집계됩니다(OOS 샤프 2.62 → 비용 차감 후 1.36).
+        cum_universe *= 1 + universe_returns[i] - cost
         if picks[i].tickers:
             trading_nights += 1
             if portfolio_returns[i] > 0:

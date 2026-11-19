@@ -19,11 +19,16 @@ def close_pos(c: Candle) -> float:
 
 
 def upper_shadow_ratio(c: Candle) -> float:
-    """윗꼬리 길이가 캔들 전체에서 차지하는 비율. 0이면 윗꼬리가 전혀 없는 꽉 찬 캔들."""
+    """윗꼬리 길이가 캔들 전체에서 차지하는 비율. 0이면 윗꼬리가 전혀 없는 꽉 찬 캔들.
+
+    윗꼬리는 몸통(시가·종가 중 높은 쪽) 위로 삐져나온 부분입니다. 예전에는 종가만 써서
+    (고가-종가)/범위 로 계산했는데, 그 값은 1 - close_pos 와 같아 피처로 넣으면 같은 정보를
+    두 번 넣는 셈이었고, 음봉에서는 몸통까지 윗꼬리로 셌습니다(2026-11-18 수정).
+    """
     span = c.high - c.low
     if span <= 0:
         return 0.0
-    return (c.high - c.close) / span
+    return (c.high - max(c.open, c.close)) / span
 
 
 def turnover(c: Candle) -> float:

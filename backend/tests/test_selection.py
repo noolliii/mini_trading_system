@@ -266,6 +266,20 @@ def test_cost_is_deducted_from_the_realized_return() -> None:
     assert free.summary.final_portfolio - taxed.summary.final_portfolio == pytest.approx(1.0)
 
 
+def test_cost_is_deducted_from_the_universe_benchmark_too() -> None:
+    """벤치마크도 매일 전 종목을 사고파는 매매라 같은 비용을 냅니다 — 포트폴리오에만 빼면
+    벤치마크가 과대 집계됩니다(실제로 OOS 샤프 2.62 가 비용 차감 후 1.36 이었습니다).
+    """
+    free = backtest_top_k(UNIVERSE_2DAY, "mean_reversion", k=1, cost=0.0)
+    taxed = backtest_top_k(UNIVERSE_2DAY, "mean_reversion", k=1, cost=0.01)
+
+    assert free.summary.final_universe - taxed.summary.final_universe == pytest.approx(1.0)
+    # 같은 비용이므로 "초과수익"(포트폴리오 - 벤치마크)은 비용과 무관해야 합니다
+    assert (free.summary.final_portfolio - free.summary.final_universe) == pytest.approx(
+        taxed.summary.final_portfolio - taxed.summary.final_universe
+    )
+
+
 def test_future_candles_never_change_an_earlier_pick() -> None:
     """미래참조 편향이 없는지 보는 테스트 — 가장 먼 미래의 일봉을 통째로 바꿔도
     그보다 앞선 전환일의 점수·선택·실현수익은 한 글자도 바뀌면 안 됩니다.

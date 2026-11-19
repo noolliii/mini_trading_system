@@ -23,6 +23,7 @@ import asyncio
 import itertools
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,8 @@ HP_GRID = {
     "lr": (1e-3, 3e-4),
 }
 ENSEMBLE_SEEDS = (42, 1, 2, 3, 4)
+# 전체 탐색이 훑는 피처 세트 — *_dedup 세트는 탐색 대상이 아니라 승자 재학습용입니다
+SEARCH_FEATURE_SETS = ("base", "extended")
 
 DayScores = list[dict[str, float]]
 
@@ -249,6 +252,7 @@ def winner_rows(winner: Evaluated, cost: float, configs_tried: int, candidates_c
         "candidates_compared": candidates_compared,
         "selected_by": "val_sharpe",
         "combine": "rank_average",
+        "huber_delta": nn_selection.HUBER_DELTA,
         "model_dir": str(WINNER_MODEL_DIR),
         # 신경망 구성원마다: 다시 만들 설정 · 파라미터 수 · 가중치를 고른 epoch · 그 epoch 의 손실
         "member_details": [
@@ -468,7 +472,7 @@ def run_search(
     # ── 데이터셋: 피처 세트 2 × 계열 2 ──────────────────────────
     datasets: dict[tuple[str, str], Dataset] = {}
     walks: dict[str, nn_selection._WalkData] = {}
-    for feature_set in nn_selection.FEATURE_SETS:
+    for feature_set in SEARCH_FEATURE_SETS:
         walks[feature_set] = nn_selection._walk_all(universe, feature_set)
         for family in ("A", "B"):
             datasets[(feature_set, family)] = build_dataset(
@@ -484,7 +488,7 @@ def run_search(
 
     # ── 1단계: 피처 세트 × 아키텍처 (기본 설정) ─────────────────
     stage1: dict[tuple[str, str], Evaluated] = {}
-    for feature_set in nn_selection.FEATURE_SETS:
+    for feature_set in SEARCH_FEATURE_SETS:
         for arch in nn_selection.NN_MODEL_REGISTRY:
             ev = run_config(dataset_for(feature_set, arch), feature_set, arch, 32, 0.3, 1e-3, 1e-3, 42, cost)
             stage1[(feature_set, arch)] = ev
@@ -587,7 +591,10 @@ def run_search(
 
 
 def rebuild_winner(
-    universe: dict[str, list[Candle]], report: dict, cost: float = nn_selection.DEFAULT_COST
+    universe: dict[str, list[Candle]],
+    report: dict,
+    cost: float = nn_selection.DEFAULT_COST,
+    feature_set: str | None = None,
 ) -> Evaluated:
     """저장된 탐색 결과(result.json)의 승자만 다시 학습합니다 — 전체 탐색(1시간 이상)을
     다시 돌리지 않고 승자의 가중치·학습 기록을 얻는 길입니다.
@@ -595,9 +602,16 @@ def rebuild_winner(
     새로 고르는 것이 없으므로 선택 편향을 더하지 않습니다. 시드가 고정이라 같은
     데이터에서는 전체 탐색 때와 같은 모델이 나옵니다. 승자가 신경망만으로 이뤄져
     있을 때만 됩니다(구성원 이름에서 설정을 복원합니다).
+
+    feature_set 을 주면 구성원의 피처 세트만 그것으로 바꿔 같은 설정·시드로 다시
+    학습합니다(예: 중복 피처를 뺀 extended_dedup). 이때는 같은 데이터가 아니라
+    수정된 입력이므로 결과가 전체 탐색 때와 달라지는 것이 정상입니다.
     """
-    members = report["winner"]["members"]
-    configs = [parse_config_name(name) for name in members]
+    configs = [parse_config_name(name) for name in report["winner"]["members"]]
+    if feature_set is not None:
+        if feature_set not in nn_selection.FEATURE_SETS:
+            raise ValueError(f"알 수 없는 피처 세트입니다: {feature_set}")
+        configs = [(a, feature_set, h, d, wd, lr, s) for a, _, h, d, wd, lr, s in configs]
 
     walks: dict[str, nn_selection._WalkData] = {"base": nn_selection._walk_all(universe, "base")}
     datasets: dict[tuple[str, str], Dataset] = {}
@@ -619,7 +633,7 @@ def rebuild_winner(
         walks["base"],
         scores,
         cost,
-        tuple(members),
+        tuple(m.name for t in trained for m in t.trained),
         tuple(m for t in trained for m in t.trained),
     )
 
@@ -651,7 +665,7 @@ async def _load_winner_report() -> dict:
     }
 
 
-async def _main(winner_only: bool = False) -> None:
+async def _main(winner_only: bool = False, feature_set: str | None = None) -> None:
     from . import db
     from .main import _fetch_universe_candles
 
@@ -663,13 +677,16 @@ async def _main(winner_only: bool = False) -> None:
         # 학습은 이벤트 루프 밖에서 돌립니다(수십 분 걸립니다)
         if winner_only:
             report = await _load_winner_report()
-            winner = await asyncio.to_thread(rebuild_winner, universe, report)
+            winner = await asyncio.to_thread(rebuild_winner, universe, report, feature_set=feature_set)
             _log(
                 event="winner_rebuilt",
                 name=winner.name,
+                feature_set=feature_set or "원래 그대로",
                 val_sharpe=winner.val_summary.sharpe,
-                expected_val_sharpe=report["winner"]["val"]["sharpe"],
+                previous_val_sharpe=report["winner"]["val"]["sharpe"],
             )
+            if feature_set is not None:
+                _archive_previous_winner()
         else:
             report, winner = await asyncio.to_thread(run_search, universe)
         rows = winner_rows(winner, nn_selection.DEFAULT_COST, report["configs_tried"], report["candidates_compared"])
@@ -683,6 +700,33 @@ async def _main(winner_only: bool = False) -> None:
         await db.disconnect()
 
 
+def _archive_previous_winner() -> None:
+    """피처 세트를 바꿔 다시 저장하기 전에, 지금 저장된 승자 가중치를 한 벌 보관합니다.
+
+    보관 이름은 manifest 의 저장 시각을 붙여(search_winner_YYYYMMDD-HHMMSS) 몇 번을 다시
+    저장해도 이전 것이 덮어써지지 않습니다.
+    """
+    manifest_path = WINNER_MODEL_DIR / MANIFEST_NAME
+    if not manifest_path.exists():
+        return
+    saved_at = json.loads(manifest_path.read_text(encoding="utf-8")).get("saved_at", "unknown")
+    stamp = "".join(ch for ch in saved_at[:19] if ch.isdigit() or ch == "T").replace("T", "-")
+    archive = WINNER_MODEL_DIR.with_name(f"{WINNER_MODEL_DIR.name}_{stamp}")
+    if not archive.exists():
+        shutil.copytree(WINNER_MODEL_DIR, archive)
+        _log(event="previous_winner_archived", dir=str(archive))
+
+
+def _argument(flag: str) -> str | None:
+    args = sys.argv[1:]
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+
+
 if __name__ == "__main__":
     # --winner-only: 전체 탐색 없이 result.json 의 승자만 다시 학습해 저장합니다
-    sys.exit(asyncio.run(_main(winner_only="--winner-only" in sys.argv[1:])))
+    # --feature-set NAME: (winner-only 와 함께) 구성원의 피처 세트를 바꿔 다시 학습합니다
+    sys.exit(
+        asyncio.run(
+            _main(winner_only="--winner-only" in sys.argv[1:], feature_set=_argument("--feature-set"))
+        )
+    )
